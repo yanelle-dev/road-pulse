@@ -1,13 +1,160 @@
 import 'package:flutter/material.dart';
+
+import '../api_service.dart';
 import '../app_theme.dart';
 import 'auth_screen.dart';
 
-class AccountScreen extends StatelessWidget {
+class AccountScreen extends StatefulWidget {
   const AccountScreen({super.key});
+
+  @override
+  State<AccountScreen> createState() => _AccountScreenState();
+}
+
+class _AccountScreenState extends State<AccountScreen> {
+  Map<String, dynamic> _profile = {
+    'phone': '+7 999 123-45-67',
+    'name': 'Водитель',
+    'city': 'Москва',
+    'car_clearance': 0,
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProfile();
+  }
+
+  Future<void> _loadProfile() async {
+    final p = await ApiService.getUserProfile();
+    if (mounted) {
+      setState(() => _profile = p);
+    }
+  }
+
+  Future<void> _showEditProfileDialog(PolotnoColors colors) async {
+    final nameCtrl = TextEditingController(text: _profile['name']);
+    final cityCtrl = TextEditingController(text: _profile['city']);
+    final currentClearance = _profile['car_clearance'];
+    final clearanceCtrl = TextEditingController(
+      text: (currentClearance is int && currentClearance > 0)
+          ? currentClearance.toString()
+          : '',
+    );
+
+    await showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: colors.surf,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Text(
+            "Редактировать данные",
+            style: TextStyle(
+              fontFamily: AppTheme.fontDisplay,
+              fontSize: 18,
+              color: colors.ink,
+            ),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtrl,
+                style: TextStyle(
+                  fontFamily: AppTheme.fontUi,
+                  color: colors.ink,
+                ),
+                decoration: InputDecoration(
+                  labelText: "Имя (ФИО)*",
+                  labelStyle: TextStyle(color: colors.ink3),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: cityCtrl,
+                style: TextStyle(
+                  fontFamily: AppTheme.fontUi,
+                  color: colors.ink,
+                ),
+                decoration: InputDecoration(
+                  labelText: "Город*",
+                  labelStyle: TextStyle(color: colors.ink3),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: clearanceCtrl,
+                keyboardType: TextInputType.number,
+                style: TextStyle(
+                  fontFamily: AppTheme.fontUi,
+                  color: colors.ink,
+                ),
+                decoration: InputDecoration(
+                  labelText: "Клиренс (мм), не обязательно",
+                  labelStyle: TextStyle(color: colors.ink3),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text("Отмена", style: TextStyle(color: colors.ink3)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: colors.mark,
+                foregroundColor: colors.onMark,
+                elevation: 0,
+              ),
+              onPressed: () async {
+                final name = nameCtrl.text.trim();
+                final city = cityCtrl.text.trim();
+                if (name.isEmpty || city.isEmpty) {
+                  return;
+                }
+                final clearance = int.tryParse(clearanceCtrl.text.trim()) ?? 0;
+                await ApiService.updateProfile(
+                  name: name,
+                  city: city,
+                  clearance: clearance,
+                );
+                if (mounted) {
+                  _loadProfile();
+                }
+                if (ctx.mounted) {
+                  Navigator.pop(ctx);
+                }
+              },
+              child: const Text("Сохранить"),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _handleLogout() async {
+    await ApiService.logout();
+    if (!mounted) return;
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const AuthScreen()),
+      (route) => false,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
+
+    final clearanceVal = _profile['car_clearance'];
+    final clearanceStr = (clearanceVal is int && clearanceVal > 0)
+        ? "клиренс $clearanceVal мм"
+        : "клиренс не указан";
 
     return Scaffold(
       backgroundColor: colors.voidBg,
@@ -16,7 +163,6 @@ class AccountScreen extends StatelessWidget {
           physics: const BouncingScrollPhysics(),
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
           children: [
-            // Кнопка «Назад»
             Align(
               alignment: Alignment.centerLeft,
               child: InkWell(
@@ -30,13 +176,15 @@ class AccountScreen extends StatelessWidget {
                     borderRadius: BorderRadius.circular(13),
                     border: Border.all(color: colors.edge2),
                   ),
-                  child: Icon(Icons.arrow_back_rounded, color: colors.ink, size: 18),
+                  child: Icon(
+                    Icons.arrow_back_rounded,
+                    color: colors.ink,
+                    size: 18,
+                  ),
                 ),
               ),
             ),
             const SizedBox(height: 22),
-
-            // Заголовок
             Text(
               "Аккаунт",
               style: TextStyle(
@@ -47,8 +195,6 @@ class AccountScreen extends StatelessWidget {
                 letterSpacing: -0.8,
               ),
             ),
-
-            // Секция «ВХОД»
             _buildSectionHeader("ВХОД", colors),
             _buildGroupCard(
               colors: colors,
@@ -56,21 +202,28 @@ class AccountScreen extends StatelessWidget {
                 _buildRowItem(
                   colors: colors,
                   icon: Icons.phone_android_rounded,
-                  title: "+7 999 123-45-67",
+                  title: _profile['phone'] ?? '+7 999 123-45-67',
                   subtitle: "Номер подтверждён",
-                  trailing: Icon(Icons.chevron_right_rounded, color: colors.ink3, size: 20),
+                  trailing: Icon(
+                    Icons.chevron_right_rounded,
+                    color: colors.ink3,
+                    size: 20,
+                  ),
                 ),
                 _buildRowItem(
                   colors: colors,
                   icon: Icons.person_outline_rounded,
-                  title: "Алексей Козлов",
-                  subtitle: "Имя, город, машина",
-                  trailing: Icon(Icons.chevron_right_rounded, color: colors.ink3, size: 20),
+                  title: _profile['name'] ?? 'Водитель',
+                  subtitle: "${_profile['city']} · $clearanceStr",
+                  trailing: Icon(
+                    Icons.edit_outlined,
+                    color: colors.markInk,
+                    size: 18,
+                  ),
+                  onTap: () => _showEditProfileDialog(colors),
                 ),
               ],
             ),
-
-            // Секция «ЗАПИСЬ»
             _buildSectionHeader("ЗАПИСЬ", colors),
             _buildGroupCard(
               colors: colors,
@@ -81,7 +234,10 @@ class AccountScreen extends StatelessWidget {
                   title: "Геопозиция в фоне",
                   subtitle: "Разрешена",
                   trailing: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
                     decoration: BoxDecoration(
                       color: colors.s1Soft,
                       borderRadius: BorderRadius.circular(999),
@@ -102,12 +258,14 @@ class AccountScreen extends StatelessWidget {
                   icon: Icons.speed_rounded,
                   title: "Порог записи",
                   subtitle: "20 км/ч · рекомендованный",
-                  trailing: Icon(Icons.chevron_right_rounded, color: colors.ink3, size: 20),
+                  trailing: Icon(
+                    Icons.chevron_right_rounded,
+                    color: colors.ink3,
+                    size: 20,
+                  ),
                 ),
               ],
             ),
-
-            // Секция «ОПАСНАЯ ЗОНА»
             _buildSectionHeader("ОПАСНАЯ ЗОНА", colors),
             _buildGroupCard(
               colors: colors,
@@ -117,13 +275,7 @@ class AccountScreen extends StatelessWidget {
                   icon: Icons.logout_rounded,
                   title: "Выйти",
                   subtitle: "Найденные дефекты останутся на карте",
-                  onTap: () {
-                    Navigator.pushAndRemoveUntil(
-                      context,
-                      MaterialPageRoute(builder: (_) => const AuthScreen()),
-                      (route) => false,
-                    );
-                  },
+                  onTap: _handleLogout,
                 ),
                 _buildRowItem(
                   colors: colors,
@@ -132,22 +284,16 @@ class AccountScreen extends StatelessWidget {
                   iconBg: colors.s3Soft,
                   title: "Удалить аккаунт",
                   titleColor: colors.s3,
-                  subtitle: "Номер и профиль стираются, дефекты станут анонимными",
-                  onTap: () {
-                    Navigator.pushAndRemoveUntil(
-                      context,
-                      MaterialPageRoute(builder: (_) => const AuthScreen()),
-                      (route) => false,
-                    );
-                  },
+                  subtitle:
+                      "Номер и профиль стираются, дефекты станут анонимными",
+                  onTap: _handleLogout,
                 ),
               ],
             ),
-
             const SizedBox(height: 28),
             Center(
               child: Text(
-                "EasyRide 2.0 · сборка 204",
+                "Дорожный пульс 2.0 · сборка 16",
                 style: TextStyle(
                   fontFamily: AppTheme.fontMono,
                   fontSize: 11.5,

@@ -1,12 +1,14 @@
 import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:latlong2/latlong.dart';
+
 import 'api_service.dart';
 import 'app_theme.dart';
-import 'widgets/road_ribbon.dart';
 import 'pothole_details_screen.dart';
+import 'widgets/road_ribbon.dart';
 
 class MapScreen extends StatefulWidget {
   final void Function(int tabIndex)? onNavigateToTab;
@@ -32,7 +34,9 @@ class _MapScreenState extends State<MapScreen> {
   Future<void> _locateUser() async {
     try {
       Position pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
       );
       if (mounted) {
         setState(() {
@@ -137,15 +141,11 @@ class _MapScreenState extends State<MapScreen> {
     final colors = context.colors;
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    final tileUrl = isDark
-        ? 'https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png'
-        : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
-
     return Scaffold(
       backgroundColor: colors.voidBg,
       body: Stack(
         children: [
-          // 1. Карта
+          // 1. Карта OpenStreetMap (без API-ключей, с darkModeTileBuilder в ночной теме)
           FlutterMap(
             mapController: _mapController,
             options: const MapOptions(
@@ -154,30 +154,28 @@ class _MapScreenState extends State<MapScreen> {
             ),
             children: [
               TileLayer(
-                urlTemplate: tileUrl,
-                subdomains: const ['a', 'b', 'c', 'd'],
-                userAgentPackageName: 'com.easyride.app',
+                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                userAgentPackageName: 'com.roadpulse.app',
+                tileBuilder: isDark ? darkModeTileBuilder : null,
               ),
               CircleLayer(circles: _buildCircles(colors)),
-              MarkerLayer(markers: [
-                ..._buildMarkers(colors),
-                if (_myLocation != null)
-                  Marker(
-                    point: _myLocation!,
-                    width: 36,
-                    height: 36,
-                    child: _buildUserLocationMarker(colors),
-                  ),
-              ]),
+              MarkerLayer(
+                markers: [
+                  ..._buildMarkers(colors),
+                  if (_myLocation != null)
+                    Marker(
+                      point: _myLocation!,
+                      width: 36,
+                      height: 36,
+                      child: _buildUserLocationMarker(colors),
+                    ),
+                ],
+              ),
             ],
           ),
 
           // 2. Верхняя статус-капсула записи
-          Positioned(
-            top: 54,
-            left: 16,
-            child: _buildRecordCapsule(colors),
-          ),
+          Positioned(top: 54, left: 16, child: _buildRecordCapsule(colors)),
 
           // 3. Строка поиска «Куда едем?»
           Positioned(
@@ -514,7 +512,9 @@ class _MapScreenState extends State<MapScreen> {
                 style: OutlinedButton.styleFrom(
                   minimumSize: const Size.fromHeight(52),
                   side: BorderSide(color: colors.edge),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
                   backgroundColor: colors.surf,
                 ),
                 onPressed: () => widget.onNavigateToTab?.call(1),
@@ -535,7 +535,12 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  Widget _buildStatPill(PolotnoColors colors, String val, String label, Color valColor) {
+  Widget _buildStatPill(
+    PolotnoColors colors,
+    String val,
+    String label,
+    Color valColor,
+  ) {
     return Expanded(
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 10),
@@ -606,7 +611,11 @@ class _MapScreenState extends State<MapScreen> {
                 color: colors.surf2,
                 borderRadius: BorderRadius.circular(14),
               ),
-              child: Icon(Icons.broken_image_outlined, color: colors.ink3, size: 24),
+              child: Icon(
+                Icons.broken_image_outlined,
+                color: colors.ink3,
+                size: 24,
+              ),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -637,7 +646,10 @@ class _MapScreenState extends State<MapScreen> {
                   Row(
                     children: [
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 7,
+                          vertical: 2,
+                        ),
                         decoration: BoxDecoration(
                           color: levelBg,
                           borderRadius: BorderRadius.circular(999),

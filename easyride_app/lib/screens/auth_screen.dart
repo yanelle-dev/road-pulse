@@ -1,5 +1,8 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
+
+import '../api_service.dart';
 import '../app_theme.dart';
 import '../main_scaffold.dart';
 
@@ -15,17 +18,22 @@ class AuthScreen extends StatefulWidget {
 class _AuthScreenState extends State<AuthScreen> {
   AuthStep _step = AuthStep.start;
 
-  // Ввод номера
   String _phoneDigits = "";
-  // Ввод СМС-кода
   String _codeDigits = "";
-  // Таймер повторной отправки
   int _resendTimerSeconds = 60;
   Timer? _resendTimer;
+  bool _isLoading = false;
+
+  final TextEditingController _nameController = TextEditingController();
+  final TextEditingController _cityController = TextEditingController();
+  final TextEditingController _clearanceController = TextEditingController();
 
   @override
   void dispose() {
     _resendTimer?.cancel();
+    _nameController.dispose();
+    _cityController.dispose();
+    _clearanceController.dispose();
     super.dispose();
   }
 
@@ -42,11 +50,95 @@ class _AuthScreenState extends State<AuthScreen> {
     });
   }
 
+  Future<void> _handleRequestCode() async {
+    setState(() => _isLoading = true);
+    final phone = "+7$_phoneDigits";
+    final success = await ApiService.requestCode(phone);
+    setState(() => _isLoading = false);
+
+    if (success) {
+      _startTimer();
+      setState(() {
+        _codeDigits = "";
+        _step = AuthStep.code;
+      });
+    } else {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Ошибка отправки запроса. Проверьте сеть."),
+        ),
+      );
+    }
+  }
+
+  Future<void> _handleVerifyCode(String code) async {
+    setState(() => _isLoading = true);
+    final phone = "+7$_phoneDigits";
+    final result = await ApiService.verifyCode(phone, code);
+    setState(() => _isLoading = false);
+
+    if (!mounted) return;
+
+    if (result.success) {
+      if (result.isNewUser) {
+        // Новый пользователь — отправляем на заполнение профиля
+        setState(() => _step = AuthStep.name);
+      } else {
+        // Уже существующий пользователь — сразу переходим на главный экран!
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (_) => const MainScaffold()),
+          (route) => false,
+        );
+      }
+    } else {
+      setState(() => _step = AuthStep.codeError);
+    }
+  }
+
+  Future<void> _handleSaveProfileAndContinue() async {
+    final name = _nameController.text.trim();
+    final city = _cityController.text.trim();
+    final clearanceText = _clearanceController.text.trim();
+
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Пожалуйста, укажите ваше имя")),
+      );
+      return;
+    }
+
+    if (city.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Пожалуйста, укажите ваш город")),
+      );
+      return;
+    }
+
+    final clearance = int.tryParse(clearanceText) ?? 0;
+
+    await ApiService.updateProfile(
+      name: name,
+      city: city,
+      clearance: clearance,
+    );
+    if (!mounted) return;
+    setState(() => _step = AuthStep.access);
+  }
+
   void _onKeyPress(String key) {
+    if (_isLoading) return;
+
     if (_step == AuthStep.phone) {
       if (key == 'del') {
         if (_phoneDigits.isNotEmpty) {
-          setState(() => _phoneDigits = _phoneDigits.substring(0, _phoneDigits.length - 1));
+          setState(
+            () => _phoneDigits = _phoneDigits.substring(
+              0,
+              _phoneDigits.length - 1,
+            ),
+          );
         }
       } else if (_phoneDigits.length < 10) {
         setState(() => _phoneDigits += key);
@@ -62,14 +154,7 @@ class _AuthScreenState extends State<AuthScreen> {
       } else if (_codeDigits.length < 4) {
         setState(() => _codeDigits += key);
         if (_codeDigits.length == 4) {
-          // Имитация валидации: если набрано 1111 — ошибка, любые другие 4 цифры — успех
-          Future.delayed(const Duration(milliseconds: 250), () {
-            if (_codeDigits == "1111") {
-              setState(() => _step = AuthStep.codeError);
-            } else {
-              setState(() => _step = AuthStep.name);
-            }
-          });
+          _handleVerifyCode(_codeDigits);
         }
       }
     }
@@ -112,7 +197,6 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
-  // --- ШАГ 0: СТАРТ ---
   Widget _buildStartStep(PolotnoColors colors) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
@@ -120,7 +204,6 @@ class _AuthScreenState extends State<AuthScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Spacer(),
-          // Полоса дорожных работ
           Container(
             width: 74,
             height: 6,
@@ -162,7 +245,9 @@ class _AuthScreenState extends State<AuthScreen> {
               backgroundColor: colors.mark,
               foregroundColor: colors.onMark,
               elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(18),
+              ),
             ),
             onPressed: () => setState(() => _step = AuthStep.phone),
             child: Text(
@@ -190,10 +275,9 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
-  // --- ШАГ 1: НОМЕР ТЕЛЕФОНА ---
   Widget _buildPhoneStep(PolotnoColors colors) {
     final formatted = _formatPhone(_phoneDigits);
-    final bool canProceed = _phoneDigits.length == 10;
+    final bool canProceed = _phoneDigits.length == 10 && !_isLoading;
 
     return Column(
       children: [
@@ -202,7 +286,10 @@ class _AuthScreenState extends State<AuthScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _buildBackButton(colors, () => setState(() => _step = AuthStep.start)),
+              _buildBackButton(
+                colors,
+                () => setState(() => _step = AuthStep.start),
+              ),
               const SizedBox(height: 20),
               Text(
                 "Ваш номер\nтелефона",
@@ -226,14 +313,14 @@ class _AuthScreenState extends State<AuthScreen> {
                 ),
               ),
               const SizedBox(height: 24),
-
-              // Поле ввода номера
               Container(
                 height: 62,
                 decoration: BoxDecoration(
                   color: colors.surf,
                   borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: canProceed ? colors.mark : colors.edge),
+                  border: Border.all(
+                    color: canProceed ? colors.mark : colors.edge,
+                  ),
                 ),
                 child: Row(
                   children: [
@@ -244,7 +331,7 @@ class _AuthScreenState extends State<AuthScreen> {
                       ),
                       child: Row(
                         children: [
-                          Text("🇷🇺 ", style: const TextStyle(fontSize: 16)),
+                          const Text("🇷🇺 ", style: TextStyle(fontSize: 16)),
                           Text(
                             "+7",
                             style: TextStyle(
@@ -281,25 +368,28 @@ class _AuthScreenState extends State<AuthScreen> {
                   backgroundColor: canProceed ? colors.mark : colors.surf2,
                   foregroundColor: canProceed ? colors.onMark : colors.ink3,
                   elevation: 0,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-                ),
-                onPressed: canProceed
-                    ? () {
-                        _startTimer();
-                        setState(() {
-                          _codeDigits = "";
-                          _step = AuthStep.code;
-                        });
-                      }
-                    : null,
-                child: Text(
-                  "Получить код",
-                  style: TextStyle(
-                    fontFamily: AppTheme.fontUi,
-                    fontSize: 16.5,
-                    fontWeight: FontWeight.w700,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
                   ),
                 ),
+                onPressed: canProceed ? _handleRequestCode : null,
+                child: _isLoading
+                    ? SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: colors.onMark,
+                        ),
+                      )
+                    : Text(
+                        "Получить код",
+                        style: TextStyle(
+                          fontFamily: AppTheme.fontUi,
+                          fontSize: 16.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
               ),
             ],
           ),
@@ -310,7 +400,6 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
-  // --- ШАГ 2: КОД ИЗ SMS (И ОШИБКА) ---
   Widget _buildCodeStep(PolotnoColors colors) {
     final bool isError = _step == AuthStep.codeError;
 
@@ -321,7 +410,10 @@ class _AuthScreenState extends State<AuthScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _buildBackButton(colors, () => setState(() => _step = AuthStep.phone)),
+              _buildBackButton(
+                colors,
+                () => setState(() => _step = AuthStep.phone),
+              ),
               const SizedBox(height: 20),
               Text(
                 "Код из SMS",
@@ -343,12 +435,12 @@ class _AuthScreenState extends State<AuthScreen> {
                 ),
               ),
               const SizedBox(height: 26),
-
-              // 4 ячейки
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: List.generate(4, (index) {
-                  final String char = index < _codeDigits.length ? _codeDigits[index] : "";
+                  final String char = index < _codeDigits.length
+                      ? _codeDigits[index]
+                      : "";
                   final bool isFilled = index < _codeDigits.length;
 
                   return Container(
@@ -365,38 +457,51 @@ class _AuthScreenState extends State<AuthScreen> {
                       ),
                     ),
                     alignment: Alignment.center,
-                    child: Text(
-                      char,
-                      style: TextStyle(
-                        fontFamily: AppTheme.fontDisplay,
-                        fontSize: 28,
-                        fontWeight: FontWeight.w700,
-                        color: isError ? colors.s3 : colors.ink,
-                      ),
-                    ),
+                    child: _isLoading && isFilled && index == 3
+                        ? SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: colors.mark,
+                            ),
+                          )
+                        : Text(
+                            char,
+                            style: TextStyle(
+                              fontFamily: AppTheme.fontDisplay,
+                              fontSize: 28,
+                              fontWeight: FontWeight.w700,
+                              color: isError ? colors.s3 : colors.ink,
+                            ),
+                          ),
                   );
                 }),
               ),
-
               if (isError) ...[
                 const SizedBox(height: 14),
                 Row(
                   children: [
-                    Icon(Icons.error_outline_rounded, color: colors.s3, size: 16),
+                    Icon(
+                      Icons.error_outline_rounded,
+                      color: colors.s3,
+                      size: 16,
+                    ),
                     const SizedBox(width: 6),
-                    Text(
-                      "Код не подошёл. Осталось 2 попытки (тест: введите любые цифры кроме 1111)",
-                      style: TextStyle(
-                        fontFamily: AppTheme.fontUi,
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w600,
-                        color: colors.s3,
+                    Expanded(
+                      child: Text(
+                        "Код не подошёл. Проверьте консоль Go-сервера (или введите 1234)",
+                        style: TextStyle(
+                          fontFamily: AppTheme.fontUi,
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: colors.s3,
+                        ),
                       ),
                     ),
                   ],
                 ),
               ],
-
               const SizedBox(height: 18),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -413,7 +518,9 @@ class _AuthScreenState extends State<AuthScreen> {
                     ),
                   ),
                   TextButton(
-                    onPressed: _resendTimerSeconds == 0 ? _startTimer : null,
+                    onPressed: _resendTimerSeconds == 0 && !_isLoading
+                        ? _handleRequestCode
+                        : null,
                     child: Text(
                       _resendTimerSeconds == 0
                           ? "Отправить снова"
@@ -421,7 +528,9 @@ class _AuthScreenState extends State<AuthScreen> {
                       style: TextStyle(
                         fontFamily: AppTheme.fontUi,
                         fontWeight: FontWeight.w600,
-                        color: _resendTimerSeconds == 0 ? colors.markInk : colors.ink3,
+                        color: _resendTimerSeconds == 0
+                            ? colors.markInk
+                            : colors.ink3,
                       ),
                     ),
                   ),
@@ -436,9 +545,9 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
-  // --- ШАГ 3: ЗНАКОМСТВО ---
   Widget _buildNameStep(PolotnoColors colors) {
-    return Padding(
+    return SingleChildScrollView(
+      physics: const BouncingScrollPhysics(),
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -457,51 +566,71 @@ class _AuthScreenState extends State<AuthScreen> {
           ),
           const SizedBox(height: 10),
           Text(
-            "Имя увидят другие водители под вашими находками. Город подставит ближайшие дороги.",
-            style: TextStyle(fontFamily: AppTheme.fontUi, fontSize: 14.5, color: colors.ink2),
+            "Имя и город обязательны. Клиренс машины можно указать позже.",
+            style: TextStyle(
+              fontFamily: AppTheme.fontUi,
+              fontSize: 14.5,
+              color: colors.ink2,
+            ),
           ),
           const SizedBox(height: 24),
-          _buildInputTile(colors, Icons.person_outline_rounded, "Алексей"),
+          _buildEditableInputTile(
+            colors: colors,
+            icon: Icons.person_outline_rounded,
+            controller: _nameController,
+            hint: "Ваше имя (обязательно)",
+          ),
           const SizedBox(height: 12),
-          _buildInputTile(colors, Icons.location_on_outlined, "Москва"),
+          _buildEditableInputTile(
+            colors: colors,
+            icon: Icons.location_on_outlined,
+            controller: _cityController,
+            hint: "Город (обязательно, например, Москва)",
+          ),
           const SizedBox(height: 12),
-          _buildInputTile(colors, Icons.directions_car_outlined, "Машина — необязательно"),
+          _buildEditableInputTile(
+            colors: colors,
+            icon: Icons.directions_car_outlined,
+            controller: _clearanceController,
+            hint: "Клиренс машины в мм (не обязательно)",
+            keyboardType: TextInputType.number,
+          ),
           const SizedBox(height: 14),
           Text(
-            "Клиренс машины помогает точнее оценивать силу удара, но его можно заполнить позже.",
-            style: TextStyle(fontFamily: AppTheme.fontUi, fontSize: 12.5, color: colors.ink3),
+            "Если клиренс не указан, приложение использует стандартную оценку качества покрытия.",
+            style: TextStyle(
+              fontFamily: AppTheme.fontUi,
+              fontSize: 12.5,
+              color: colors.ink3,
+            ),
           ),
-          const Spacer(),
+          const SizedBox(height: 36),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
               minimumSize: const Size.fromHeight(56),
               backgroundColor: colors.mark,
               foregroundColor: colors.onMark,
               elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(18),
+              ),
             ),
-            onPressed: () => setState(() => _step = AuthStep.access),
+            onPressed: _handleSaveProfileAndContinue,
             child: Text(
               "Продолжить",
-              style: TextStyle(fontFamily: AppTheme.fontUi, fontSize: 16.5, fontWeight: FontWeight.w700),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Center(
-            child: TextButton(
-              onPressed: () => setState(() => _step = AuthStep.access),
-              child: Text(
-                "Пропустить",
-                style: TextStyle(fontFamily: AppTheme.fontUi, fontSize: 14.5, fontWeight: FontWeight.w600, color: colors.ink2),
+              style: TextStyle(
+                fontFamily: AppTheme.fontUi,
+                fontSize: 16.5,
+                fontWeight: FontWeight.w700,
               ),
             ),
           ),
+          const SizedBox(height: 16),
         ],
       ),
     );
   }
 
-  // --- ШАГ 4: ДОСТУПЫ ---
   Widget _buildAccessStep(PolotnoColors colors) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
@@ -536,7 +665,11 @@ class _AuthScreenState extends State<AuthScreen> {
           const SizedBox(height: 14),
           Text(
             "Чтобы записывать дорогу, приложению нужны два доступа. Оба можно отозвать в любой момент.",
-            style: TextStyle(fontFamily: AppTheme.fontUi, fontSize: 15, color: colors.ink2),
+            style: TextStyle(
+              fontFamily: AppTheme.fontUi,
+              fontSize: 15,
+              color: colors.ink2,
+            ),
           ),
           const SizedBox(height: 26),
           _buildAccessItem(
@@ -566,7 +699,9 @@ class _AuthScreenState extends State<AuthScreen> {
               backgroundColor: colors.mark,
               foregroundColor: colors.onMark,
               elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(18),
+              ),
             ),
             onPressed: () {
               Navigator.pushAndRemoveUntil(
@@ -577,14 +712,22 @@ class _AuthScreenState extends State<AuthScreen> {
             },
             child: Text(
               "Разрешить и поехали",
-              style: TextStyle(fontFamily: AppTheme.fontUi, fontSize: 16.5, fontWeight: FontWeight.w700),
+              style: TextStyle(
+                fontFamily: AppTheme.fontUi,
+                fontSize: 16.5,
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
           const SizedBox(height: 12),
           Center(
             child: Text(
               "Без геопозиции карта работает, но запись — нет",
-              style: TextStyle(fontFamily: AppTheme.fontUi, fontSize: 11.5, color: colors.ink3),
+              style: TextStyle(
+                fontFamily: AppTheme.fontUi,
+                fontSize: 11.5,
+                color: colors.ink3,
+              ),
             ),
           ),
         ],
@@ -592,7 +735,6 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
-  // --- ВСПОМОГАТЕЛЬНЫЕ ВИДЖЕТЫ ---
   Widget _buildBackButton(PolotnoColors colors, VoidCallback onTap) {
     return InkWell(
       onTap: onTap,
@@ -610,7 +752,13 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
-  Widget _buildInputTile(PolotnoColors colors, IconData icon, String hint) {
+  Widget _buildEditableInputTile({
+    required PolotnoColors colors,
+    required IconData icon,
+    required TextEditingController controller,
+    required String hint,
+    TextInputType keyboardType = TextInputType.text,
+  }) {
     return Container(
       height: 58,
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -624,13 +772,24 @@ class _AuthScreenState extends State<AuthScreen> {
           Icon(icon, color: colors.ink3, size: 20),
           const SizedBox(width: 12),
           Expanded(
-            child: Text(
-              hint,
+            child: TextField(
+              controller: controller,
+              keyboardType: keyboardType,
               style: TextStyle(
                 fontFamily: AppTheme.fontUi,
                 fontSize: 15.5,
                 fontWeight: FontWeight.w600,
                 color: colors.ink,
+              ),
+              decoration: InputDecoration(
+                hintText: hint,
+                hintStyle: TextStyle(
+                  fontFamily: AppTheme.fontUi,
+                  fontSize: 14.5,
+                  color: colors.ink3,
+                ),
+                border: InputBorder.none,
+                isDense: true,
               ),
             ),
           ),
@@ -639,7 +798,12 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
-  Widget _buildAccessItem(PolotnoColors colors, IconData icon, String title, String desc) {
+  Widget _buildAccessItem(
+    PolotnoColors colors,
+    IconData icon,
+    String title,
+    String desc,
+  ) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -719,7 +883,11 @@ class _AuthScreenState extends State<AuthScreen> {
                       ),
                       onPressed: () => _onKeyPress(k),
                       child: k == 'del'
-                          ? Icon(Icons.backspace_outlined, size: 20, color: colors.ink)
+                          ? Icon(
+                              Icons.backspace_outlined,
+                              size: 20,
+                              color: colors.ink,
+                            )
                           : Text(
                               k,
                               style: TextStyle(

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+
+import 'api_service.dart';
 import 'app_theme.dart';
-import 'widgets/road_ribbon.dart';
 import 'screens/account_screen.dart';
+import 'widgets/road_ribbon.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -33,74 +35,99 @@ class ProfileScreen extends StatelessWidget {
   Widget _buildHeader(BuildContext context, PolotnoColors colors) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
-      child: Row(
-        children: [
-          // Желтый квадратный аватар с инициалами
-          Container(
-            width: 76,
-            height: 76,
-            decoration: BoxDecoration(
-              color: colors.mark,
-              borderRadius: BorderRadius.circular(24),
-            ),
-            alignment: Alignment.center,
-            child: Text(
-              "АК",
-              style: TextStyle(
-                fontFamily: AppTheme.fontDisplay,
-                fontSize: 26,
-                fontWeight: FontWeight.w700,
-                color: colors.onMark,
-                letterSpacing: -0.8,
-              ),
-            ),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  "Алексей\nКозлов",
+      child: FutureBuilder<Map<String, dynamic>>(
+        future: ApiService.getUserProfile(),
+        builder: (context, snapshot) {
+          final name = snapshot.data?['name'] ?? 'Водитель';
+          final city = snapshot.data?['city'] ?? 'Москва';
+          final clearanceVal = snapshot.data?['car_clearance'];
+          final clearanceStr = (clearanceVal is int && clearanceVal > 0)
+              ? "клиренс $clearanceVal мм"
+              : "клиренс не указан";
+
+          // Формирование инициалов для аватара
+          final parts = name.trim().split(RegExp(r'\s+'));
+          String initials = "В";
+          if (parts.length >= 2 && parts[0].isNotEmpty && parts[1].isNotEmpty) {
+            initials = "${parts[0][0]}${parts[1][0]}".toUpperCase();
+          } else if (parts.isNotEmpty && parts[0].isNotEmpty) {
+            initials = parts[0]
+                .substring(0, parts[0].length >= 2 ? 2 : 1)
+                .toUpperCase();
+          }
+
+          return Row(
+            children: [
+              Container(
+                width: 76,
+                height: 76,
+                decoration: BoxDecoration(
+                  color: colors.mark,
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  initials,
                   style: TextStyle(
                     fontFamily: AppTheme.fontDisplay,
-                    fontSize: 22,
+                    fontSize: 26,
                     fontWeight: FontWeight.w700,
-                    color: colors.ink,
-                    letterSpacing: -0.6,
-                    height: 1.1,
+                    color: colors.onMark,
+                    letterSpacing: -0.8,
                   ),
                 ),
-                const SizedBox(height: 7),
-                Text(
-                  "Москва · с марта 2026",
-                  style: TextStyle(
-                    fontFamily: AppTheme.fontMono,
-                    fontSize: 11.5,
-                    color: colors.ink3,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // Кнопка перехода в настройки аккаунта
-          IconButton(
-            style: IconButton.styleFrom(
-              backgroundColor: colors.surf,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(13),
-                side: BorderSide(color: colors.edge2),
               ),
-            ),
-            icon: Icon(Icons.settings_outlined, color: colors.ink, size: 20),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const AccountScreen()),
-              );
-            },
-          ),
-        ],
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      style: TextStyle(
+                        fontFamily: AppTheme.fontDisplay,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                        color: colors.ink,
+                        letterSpacing: -0.6,
+                        height: 1.1,
+                      ),
+                    ),
+                    const SizedBox(height: 7),
+                    Text(
+                      "$city · $clearanceStr",
+                      style: TextStyle(
+                        fontFamily: AppTheme.fontMono,
+                        fontSize: 11.5,
+                        color: colors.ink3,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                style: IconButton.styleFrom(
+                  backgroundColor: colors.surf,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(13),
+                    side: BorderSide(color: colors.edge2),
+                  ),
+                ),
+                icon: Icon(
+                  Icons.settings_outlined,
+                  color: colors.ink,
+                  size: 20,
+                ),
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const AccountScreen()),
+                  );
+                },
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -145,17 +172,41 @@ class ProfileScreen extends StatelessWidget {
         children: [
           Row(
             children: [
-              _buildStatCard(colors, "147", "Дефектов найдено", "+12 за неделю", colors.s1),
+              _buildStatCard(
+                colors,
+                "147",
+                "Дефектов найдено",
+                "+12 за неделю",
+                colors.s1,
+              ),
               const SizedBox(width: 8),
-              _buildStatCard(colors, "1 234", "Километров записано", "+86 км", colors.s1),
+              _buildStatCard(
+                colors,
+                "1 234",
+                "Километров записано",
+                "+86 км",
+                colors.s1,
+              ),
             ],
           ),
           const SizedBox(height: 8),
           Row(
             children: [
-              _buildStatCard(colors, "2 840", "Очков рейтинга", "+340", colors.s1),
+              _buildStatCard(
+                colors,
+                "2 840",
+                "Очков рейтинга",
+                "+340",
+                colors.s1,
+              ),
               const SizedBox(width: 8),
-              _buildStatCard(colors, "12", "Подвесок спасено", "по объездам", colors.s1),
+              _buildStatCard(
+                colors,
+                "12",
+                "Подвесок спасено",
+                "по объездам",
+                colors.s1,
+              ),
             ],
           ),
         ],
@@ -163,7 +214,13 @@ class ProfileScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildStatCard(PolotnoColors colors, String val, String title, String diff, Color diffColor) {
+  Widget _buildStatCard(
+    PolotnoColors colors,
+    String val,
+    String title,
+    String diff,
+    Color diffColor,
+  ) {
     return Expanded(
       child: Container(
         padding: const EdgeInsets.all(16),
@@ -327,10 +384,26 @@ class ProfileScreen extends StatelessWidget {
 
   Widget _buildAchievements(PolotnoColors colors) {
     final achievements = [
-      {"icon": Icons.adjust_rounded, "title": "Охотник\nза ямами", "color": colors.s3},
-      {"icon": Icons.shield_outlined, "title": "Спаситель\nподвесок", "color": colors.markInk},
-      {"icon": Icons.bolt_rounded, "title": "1 000 км\nза месяц", "color": colors.s1},
-      {"icon": Icons.nightlight_round, "title": "Ночной\nдозор", "color": colors.ink2},
+      {
+        "icon": Icons.adjust_rounded,
+        "title": "Охотник\nза ямами",
+        "color": colors.s3,
+      },
+      {
+        "icon": Icons.shield_outlined,
+        "title": "Спаситель\nподвесок",
+        "color": colors.markInk,
+      },
+      {
+        "icon": Icons.bolt_rounded,
+        "title": "1 000 км\nза месяц",
+        "color": colors.s1,
+      },
+      {
+        "icon": Icons.nightlight_round,
+        "title": "Ночной\nдозор",
+        "color": colors.ink2,
+      },
     ];
 
     return Padding(
@@ -373,7 +446,10 @@ class ProfileScreen extends StatelessWidget {
                 return Container(
                   width: 104,
                   margin: const EdgeInsets.only(right: 9),
-                  padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 11),
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 15,
+                    horizontal: 11,
+                  ),
                   decoration: BoxDecoration(
                     color: colors.surf,
                     borderRadius: BorderRadius.circular(18),
@@ -388,7 +464,11 @@ class ProfileScreen extends StatelessWidget {
                           color: colors.surf2,
                           borderRadius: BorderRadius.circular(13),
                         ),
-                        child: Icon(ach["icon"] as IconData, color: ach["color"] as Color, size: 20),
+                        child: Icon(
+                          ach["icon"] as IconData,
+                          color: ach["color"] as Color,
+                          size: 20,
+                        ),
                       ),
                       const SizedBox(height: 10),
                       Text(
@@ -416,10 +496,34 @@ class ProfileScreen extends StatelessWidget {
   Widget _buildActivityHeatmap(PolotnoColors colors) {
     const days = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"];
     final pattern = [
-      1, 2, 1, 0, 3, 2, 1,
-      2, 3, 2, 1, 3, 1, 0,
-      1, 1, 3, 2, 3, 2, 2,
-      0, 2, 1, 3, 3, 1, 2
+      1,
+      2,
+      1,
+      0,
+      3,
+      2,
+      1,
+      2,
+      3,
+      2,
+      1,
+      3,
+      1,
+      0,
+      1,
+      1,
+      3,
+      2,
+      3,
+      2,
+      2,
+      0,
+      2,
+      1,
+      3,
+      3,
+      1,
+      2,
     ];
 
     final levels = [
@@ -519,15 +623,17 @@ class ProfileScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: 6),
-                    ...levels.map((c) => Container(
-                          width: 12,
-                          height: 12,
-                          margin: const EdgeInsets.only(right: 3),
-                          decoration: BoxDecoration(
-                            color: c,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                        )),
+                    ...levels.map(
+                      (c) => Container(
+                        width: 12,
+                        height: 12,
+                        margin: const EdgeInsets.only(right: 3),
+                        decoration: BoxDecoration(
+                          color: c,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                      ),
+                    ),
                     const SizedBox(width: 3),
                     Text(
                       "ЧАЩЕ",
