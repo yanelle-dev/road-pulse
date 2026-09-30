@@ -28,6 +28,7 @@ type AuthResponse struct {
 	AccessToken  string      `json:"access_token"`
 	RefreshToken string      `json:"refresh_token"`
 	User         UserProfile `json:"user"`
+	IsNewUser    bool        `json:"is_new_user"`
 }
 
 type UpdateProfilePayload struct {

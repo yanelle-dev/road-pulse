@@ -97,7 +97,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("EasyRide Go backend (Auth + Telemetry) слушает порт :%s", cfg.Port)
+		log.Printf("Дорожный пульс (Road Pulse) Go backend (Auth + Telemetry) слушает порт :%s", cfg.Port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Ошибка HTTP-сервера: %v", err)
 		}

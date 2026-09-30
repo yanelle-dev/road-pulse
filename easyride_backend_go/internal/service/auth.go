@@ -61,14 +61,12 @@ func (s *AuthService) normalizePhone(phone string) string {
 	return res
 }
 
-// RequestCode генерирует 4-значный код и сохраняет его хэш в БД
 func (s *AuthService) RequestCode(ctx context.Context, rawPhone string) (int, error) {
 	phone := s.normalizePhone(rawPhone)
 	if len(phone) < 10 {
 		return 0, errors.New("некорректный номер телефона")
 	}
 
-	// Генерация 4-значного кода (для тестов '1234' или случайный)
 	n, _ := rand.Int(rand.Reader, big.NewInt(9000))
 	code := fmt.Sprintf("%04d", n.Int64()+1000)
 
@@ -88,15 +86,13 @@ func (s *AuthService) RequestCode(ctx context.Context, rawPhone string) (int, er
 		return 0, fmt.Errorf("ошибка сохранения OTP: %w", err)
 	}
 
-	// На этапе разработки выводим код в терминал для мгновенного тестирования
 	log.Printf("==================================================")
 	log.Printf("📱 [SMS-GATEWAY MOCK] Телефон: %s | Код: %s (или 1234)", phone, code)
 	log.Printf("==================================================")
 
-	return 60, nil // тайм-аут повторной отправки в секундах
+	return 60, nil
 }
 
-// VerifyCode сверяет код, создаёт/находит пользователя и возвращает токены
 func (s *AuthService) VerifyCode(ctx context.Context, rawPhone, code string) (*models.AuthResponse, error) {
 	phone := s.normalizePhone(rawPhone)
 	code = strings.TrimSpace(code)
@@ -122,33 +118,52 @@ func (s *AuthService) VerifyCode(ctx context.Context, rawPhone, code string) (*m
 		return nil, ErrCodeExpired
 	}
 
-	// Проверяем соответствие: реальный код либо мастер-код '1234' для удобства разработки
 	inputHash := s.hashString(code)
 	if inputHash != codeHash && code != "1234" {
 		_, _ = s.pool.Exec(ctx, "UPDATE otp_codes SET attempts = attempts + 1 WHERE phone = $1;", phone)
 		return nil, ErrInvalidCode
 	}
 
-	// Код верен — удаляем использованный OTP
 	_, _ = s.pool.Exec(ctx, "DELETE FROM otp_codes WHERE phone = $1;", phone)
 
-	// Находим или регистрируем пользователя
 	var user models.UserProfile
-	userQuery := `
-		INSERT INTO users (id, phone, name, city, car_clearance, created_at)
-		VALUES ($1, $2, 'Водитель', 'Москва', 160, NOW())
-		ON CONFLICT (phone) DO UPDATE SET phone = EXCLUDED.phone
-		RETURNING id, phone, name, city, car_clearance, created_at;
-	`
-	newID := "usr_" + s.hashString(phone + fmt.Sprintf("%d", time.Now().UnixNano()))[:16]
-	err = s.pool.QueryRow(ctx, userQuery, newID, phone).Scan(
+	var isNewUser bool
+
+	// Проверяем, существует ли уже пользователь в базе
+	findQuery := `SELECT id, phone, name, city, car_clearance, created_at FROM users WHERE phone = $1;`
+	err = s.pool.QueryRow(ctx, findQuery, phone).Scan(
 		&user.ID, &user.Phone, &user.Name, &user.City, &user.CarClearance, &user.CreatedAt,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка получения пользователя: %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Новый пользователь: создаём запись с пустыми полями
+			isNewUser = true
+			newID := "usr_" + s.hashString(phone+fmt.Sprintf("%d", time.Now().UnixNano()))[:16]
+			insertQuery := `
+				INSERT INTO users (id, phone, name, city, car_clearance, created_at)
+				VALUES ($1, $2, '', '', 0, NOW())
+				RETURNING id, phone, name, city, car_clearance, created_at;
+			`
+			err = s.pool.QueryRow(ctx, insertQuery, newID, phone).Scan(
+				&user.ID, &user.Phone, &user.Name, &user.City, &user.CarClearance, &user.CreatedAt,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("ошибка создания пользователя: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("ошибка поиска пользователя: %w", err)
+		}
+	} else {
+		// Пользователь уже был в базе. Если имя и город заполнены, он НЕ новый
+		trimmedName := strings.TrimSpace(user.Name)
+		trimmedCity := strings.TrimSpace(user.City)
+		if trimmedName == "" || trimmedCity == "" {
+			isNewUser = true
+		} else {
+			isNewUser = false
+		}
 	}
 
-	// Генерация пары JWT + Refresh Token
 	accessToken, err := s.generateAccessToken(user.ID, user.Phone)
 	if err != nil {
 		return nil, err
@@ -163,6 +178,7 @@ func (s *AuthService) VerifyCode(ctx context.Context, rawPhone, code string) (*m
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		User:         user,
+		IsNewUser:    isNewUser,
 	}, nil
 }
 
@@ -184,7 +200,7 @@ func (s *AuthService) generateRefreshToken(ctx context.Context, userID string) (
 	}
 	tokenStr := hex.EncodeToString(bytes)
 	tokenHash := s.hashString(tokenStr)
-	expiresAt := time.Now().Add(60 * 24 * time.Hour) // 60 дней
+	expiresAt := time.Now().Add(60 * 24 * time.Hour)
 
 	query := `
 		INSERT INTO refresh_tokens (token_hash, user_id, expires_at, revoked, created_at)
@@ -196,7 +212,6 @@ func (s *AuthService) generateRefreshToken(ctx context.Context, userID string) (
 	return tokenStr, nil
 }
 
-// Refresh обновляет access-токен по действующему refresh-токену
 func (s *AuthService) Refresh(ctx context.Context, oldRefreshToken string) (*models.AuthResponse, error) {
 	tokenHash := s.hashString(oldRefreshToken)
 
@@ -210,7 +225,6 @@ func (s *AuthService) Refresh(ctx context.Context, oldRefreshToken string) (*mod
 		return nil, ErrInvalidToken
 	}
 
-	// Отзываем использованный токен (ротация сессий)
 	_, _ = s.pool.Exec(ctx, "UPDATE refresh_tokens SET revoked = true WHERE token_hash = $1;", tokenHash)
 
 	user, err := s.GetProfile(ctx, userID)
@@ -231,10 +245,10 @@ func (s *AuthService) Refresh(ctx context.Context, oldRefreshToken string) (*mod
 		AccessToken:  newAccessToken,
 		RefreshToken: newRefreshToken,
 		User:         *user,
+		IsNewUser:    false,
 	}, nil
 }
 
-// ValidateAccessToken проверяет подпись JWT и извлекает userID
 func (s *AuthService) ValidateAccessToken(tokenStr string) (string, error) {
 	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -258,7 +272,6 @@ func (s *AuthService) ValidateAccessToken(tokenStr string) (string, error) {
 	return sub, nil
 }
 
-// GetProfile возвращает профиль пользователя
 func (s *AuthService) GetProfile(ctx context.Context, userID string) (*models.UserProfile, error) {
 	var user models.UserProfile
 	query := `SELECT id, phone, name, city, car_clearance, created_at FROM users WHERE id = $1;`
@@ -274,7 +287,6 @@ func (s *AuthService) GetProfile(ctx context.Context, userID string) (*models.Us
 	return &user, nil
 }
 
-// UpdateProfile обновляет имя, город или клиренс автомобиля
 func (s *AuthService) UpdateProfile(ctx context.Context, userID string, p *models.UpdateProfilePayload) (*models.UserProfile, error) {
 	user, err := s.GetProfile(ctx, userID)
 	if err != nil {
