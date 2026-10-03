@@ -1,6 +1,6 @@
 package models
 
-import "../../../backend/internal/models/time"
+import "time"
 
 type RequestCodePayload struct {
 	Phone string `json:"phone"`

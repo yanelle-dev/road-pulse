@@ -34,7 +34,7 @@ type AuthService struct {
 
 func NewAuthService(pool *pgxpool.Pool, secret string) *AuthService {
 	if secret == "" {
-		secret = "easyride_super_secret_jwt_key_2026"
+		secret = "road_pulse_super_secret_jwt_key_2026"
 	}
 	return &AuthService{
 		pool:      pool,

@@ -4,10 +4,7 @@ import '../app_theme.dart';
 import 'glass_panel.dart';
 
 class OnboardingPanel extends StatefulWidget {
-  const OnboardingPanel({
-    super.key,
-    required this.onAllow,
-  });
+  const OnboardingPanel({super.key, required this.onAllow});
 
   final Future<void> Function() onAllow;
 
@@ -29,11 +26,14 @@ class _OnboardingPanelState extends State<OnboardingPanel>
       vsync: this,
       duration: const Duration(milliseconds: 700),
     );
-    _fade = CurvedAnimation(parent: _fadeController, curve: Curves.easeOutCubic);
-    _slide = Tween<Offset>(
-      begin: const Offset(0, 0.06),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(parent: _fadeController, curve: Curves.easeOutCubic));
+    _fade = CurvedAnimation(
+      parent: _fadeController,
+      curve: Curves.easeOutCubic,
+    );
+    _slide = Tween<Offset>(begin: const Offset(0, 0.06), end: Offset.zero)
+        .animate(
+          CurvedAnimation(parent: _fadeController, curve: Curves.easeOutCubic),
+        );
     _fadeController.forward();
   }
 
@@ -99,7 +99,7 @@ class _OnboardingPanelState extends State<OnboardingPanel>
                         ),
                         const SizedBox(height: 28),
                         Text(
-                          'EasyRide',
+                          'Дорожный Пульс',
                           style: TextStyle(
                             fontFamily: AppTheme.fontDisplay,
                             fontSize: 28,
@@ -110,7 +110,7 @@ class _OnboardingPanelState extends State<OnboardingPanel>
                         ),
                         const SizedBox(height: 16),
                         Text(
-                          'EasyRide требует доступ к GPS и фоновой работе, '
+                          'Дорожный Пульс требует доступ к GPS и фоновой работе, '
                           'чтобы строить карту ям в реальном времени',
                           textAlign: TextAlign.center,
                           style: TextStyle(
@@ -150,10 +150,7 @@ class _OnboardingPanelState extends State<OnboardingPanel>
 }
 
 class _MagneticAllowButton extends StatefulWidget {
-  const _MagneticAllowButton({
-    required this.onPressed,
-    required this.busy,
-  });
+  const _MagneticAllowButton({required this.onPressed, required this.busy});
 
   final VoidCallback onPressed;
   final bool busy;
@@ -209,8 +206,18 @@ class _MagneticAllowButtonState extends State<_MagneticAllowButton> {
               duration: const Duration(milliseconds: 180),
               curve: Curves.easeOutCubic,
               transform: Matrix4.identity()
-                ..translateByDouble(_offset.dx, _offset.dy + (_pressed ? 1.0 : 0.0), 0, 1)
-                ..scaleByDouble(_pressed ? 0.97 : 1.0, _pressed ? 0.97 : 1.0, 1, 1),
+                ..translateByDouble(
+                  _offset.dx,
+                  _offset.dy + (_pressed ? 1.0 : 0.0),
+                  0,
+                  1,
+                )
+                ..scaleByDouble(
+                  _pressed ? 0.97 : 1.0,
+                  _pressed ? 0.97 : 1.0,
+                  1,
+                  1,
+                ),
               transformAlignment: Alignment.center,
               width: double.infinity,
               height: 56,

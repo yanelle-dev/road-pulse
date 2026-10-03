@@ -7,10 +7,10 @@ services:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: password123
       POSTGRES_DB: road_pulse_db
-    ports:
-      - '5432:5432'
     volumes:
       - road_pulse_data:/var/lib/postgresql/data
+    networks:
+      - road_pulse_net
 
   api:
     build: .
@@ -25,6 +25,12 @@ services:
       - '8001:8000'
     depends_on:
       - db
+    networks:
+      - road_pulse_net
 
 volumes:
   road_pulse_data:
+
+networks:
+  road_pulse_net:
+    driver: bridge
