@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgis/postgis:15-3.3
+    container_name: road_pulse_db
+    restart: always
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: road_pulse_db
+    ports:
+      - '5432:5432'
+    volumes:
+      - road_pulse_data:/var/lib/postgresql/data
+
+  api:
+    build: .
+    container_name: road_pulse_api
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://admin:password123@db:5432/road_pulse_db
+      - PORT=8000
+      - OSRM_BASE=https://router.project-osrm.org
+      - JWT_SECRET=road_pulse_secret_key_prod_2026
+    ports:
+      - '8001:8000'
+    depends_on:
+      - db
+
+volumes:
+  road_pulse_data:
