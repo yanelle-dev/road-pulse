@@ -1,11 +1,13 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
-import 'app_theme.dart';
+import 'achievement_service.dart';
 import 'api_service.dart';
+import 'app_theme.dart';
 import 'sensor_service.dart';
 import 'widgets/onboarding_panel.dart';
 
@@ -25,6 +27,7 @@ class _DetectScreenState extends State<DetectScreen> {
   double _currentSpeed = 0.0;
   final int _maxDataPoints = 60;
   List<double> _accelData = [];
+  Position? _lastPosition;
 
   @override
   void initState() {
@@ -55,20 +58,39 @@ class _DetectScreenState extends State<DetectScreen> {
   }
 
   void _initSensors() {
-    _positionStream = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 2,
-      ),
-    ).listen((Position position) {
-      if (mounted) {
-        setState(() {
-          _currentSpeed = (position.speed * 3.6).clamp(0.0, 999.0);
-        });
-      }
-    });
+    _positionStream =
+        Geolocator.getPositionStream(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            distanceFilter: 2,
+          ),
+        ).listen((Position position) {
+          if (mounted) {
+            final speedKmh = (position.speed * 3.6).clamp(0.0, 999.0);
 
-    _accelStream = userAccelerometerEventStream().listen((UserAccelerometerEvent event) {
+            // Накопление фонового километража для достижений при скорости >= 20 км/ч
+            if (_isActive && speedKmh >= 20.0 && _lastPosition != null) {
+              final distanceM = Geolocator.distanceBetween(
+                _lastPosition!.latitude,
+                _lastPosition!.longitude,
+                position.latitude,
+                position.longitude,
+              );
+              if (distanceM > 0 && distanceM < 500) {
+                AchievementService.addDistanceMeters(distanceM);
+              }
+            }
+            _lastPosition = position;
+
+            setState(() {
+              _currentSpeed = speedKmh;
+            });
+          }
+        });
+
+    _accelStream = userAccelerometerEventStream().listen((
+      UserAccelerometerEvent event,
+    ) {
       if (mounted) {
         setState(() {
           _accelData.removeAt(0);
@@ -81,18 +103,25 @@ class _DetectScreenState extends State<DetectScreen> {
   Future<void> _checkPermissionsAndStart() async {
     LocationPermission permission = await Geolocator.checkPermission();
 
-    if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
+    if (permission == LocationPermission.always ||
+        permission == LocationPermission.whileInUse) {
       await _initForegroundTask();
-      if (!_isActive) _toggleTracking();
+      if (!_isActive) {
+        _toggleTracking();
+      }
     } else {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
       Navigator.push(
         context,
         MaterialPageRoute(
           builder: (context) => OnboardingPanel(
             onAllow: () async {
               await _initForegroundTask();
-              if (!_isActive) _toggleTracking();
+              if (!_isActive) {
+                _toggleTracking();
+              }
               if (context.mounted) {
                 Navigator.pop(context);
               }
@@ -287,7 +316,9 @@ class _DetectScreenState extends State<DetectScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(
-            isAboveThreshold ? Icons.check_circle_outline_rounded : Icons.info_outline_rounded,
+            isAboveThreshold
+                ? Icons.check_circle_outline_rounded
+                : Icons.info_outline_rounded,
             color: isAboveThreshold ? colors.s1 : colors.ink3,
             size: 18,
           ),
@@ -306,12 +337,21 @@ class _DetectScreenState extends State<DetectScreen> {
                         const TextSpan(text: "Скорость выше порога — "),
                         TextSpan(
                           text: "удары записываются",
-                          style: TextStyle(color: colors.ink, fontWeight: FontWeight.w700),
+                          style: TextStyle(
+                            color: colors.ink,
+                            fontWeight: FontWeight.w700,
+                          ),
                         ),
-                        const TextSpan(text: ". При снижении ниже 20 км/ч детекция замирает автоматически."),
+                        const TextSpan(
+                          text:
+                              ". При снижении ниже 20 км/ч детекция замирает автоматически.",
+                        ),
                       ]
                     : [
-                        const TextSpan(text: "Скорость ниже порога 20 км/ч. Дворы и пробки отсекаются, чтобы избежать ложных срабатываний."),
+                        const TextSpan(
+                          text:
+                              "Скорость ниже порога 20 км/ч. Дворы и пробки отсекаются, чтобы избежать ложных срабатываний.",
+                        ),
                       ],
               ),
             ),
@@ -441,13 +481,16 @@ class _DetectScreenState extends State<DetectScreen> {
                       final dynamic d = entry;
                       try {
                         final t = d.time;
-                        if (t != null) time = t.toString();
+                        if (t != null) {
+                          time = t.toString();
+                        }
                       } catch (_) {}
                       if (time.isEmpty) {
                         try {
                           final ts = d.timestamp;
                           if (ts is DateTime) {
-                            time = '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}';
+                            time =
+                                '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}';
                           } else if (ts != null) {
                             time = ts.toString();
                           }
@@ -456,12 +499,16 @@ class _DetectScreenState extends State<DetectScreen> {
 
                       try {
                         final m = d.message;
-                        if (m != null && m.toString().isNotEmpty) message = m.toString();
+                        if (m != null && m.toString().isNotEmpty) {
+                          message = m.toString();
+                        }
                       } catch (_) {}
                       if (message.isEmpty) {
                         try {
                           final txt = d.text;
-                          if (txt != null && txt.toString().isNotEmpty) message = txt.toString();
+                          if (txt != null && txt.toString().isNotEmpty) {
+                            message = txt.toString();
+                          }
                         } catch (_) {}
                       }
                       if (message.isEmpty) {
@@ -470,17 +517,26 @@ class _DetectScreenState extends State<DetectScreen> {
 
                       try {
                         final k = d.kind ?? d.level ?? d.type;
-                        if (k != null) kind = k.toString().toLowerCase();
+                        if (k != null) {
+                          kind = k.toString().toLowerCase();
+                        }
                       } catch (_) {}
                     }
 
                     Color textColor = const Color(0xFF98A1A8);
                     final lowerMsg = message.toLowerCase();
-                    if (kind == 'hit' || lowerMsg.contains('удар') || lowerMsg.contains('дефект')) {
+                    if (kind == 'hit' ||
+                        lowerMsg.contains('удар') ||
+                        lowerMsg.contains('дефект')) {
                       textColor = colors.s3;
-                    } else if (kind == 'ok' || lowerMsg.contains('fix') || lowerMsg.contains('служба') || lowerMsg.contains('подтверждён')) {
+                    } else if (kind == 'ok' ||
+                        lowerMsg.contains('fix') ||
+                        lowerMsg.contains('служба') ||
+                        lowerMsg.contains('подтверждён')) {
                       textColor = colors.s1;
-                    } else if (kind == 'warn' || lowerMsg.contains('порог') || lowerMsg.contains('пауза')) {
+                    } else if (kind == 'warn' ||
+                        lowerMsg.contains('порог') ||
+                        lowerMsg.contains('пауза')) {
                       textColor = colors.mark;
                     }
 
@@ -583,10 +639,22 @@ class PolotnoScopePainter extends CustomPainter {
     final double yThresholdTop = midY - (7.0 / maxG) * (midY - 4);
     final double yThresholdBottom = midY + (7.0 / maxG) * (midY - 4);
 
-    _drawDashedLine(canvas, Offset(0, yThresholdTop), Offset(size.width, yThresholdTop), gridPaint);
-    _drawDashedLine(canvas, Offset(0, yThresholdBottom), Offset(size.width, yThresholdBottom), gridPaint);
+    _drawDashedLine(
+      canvas,
+      Offset(0, yThresholdTop),
+      Offset(size.width, yThresholdTop),
+      gridPaint,
+    );
+    _drawDashedLine(
+      canvas,
+      Offset(0, yThresholdBottom),
+      Offset(size.width, yThresholdBottom),
+      gridPaint,
+    );
 
-    if (data.length < 2) return;
+    if (data.length < 2) {
+      return;
+    }
 
     final linePaint = Paint()
       ..color = lineColor
@@ -614,7 +682,8 @@ class PolotnoScopePainter extends CustomPainter {
     final double lastVal = data.last;
     if (lastVal.abs() >= 4.0) {
       final dotPaint = Paint()..color = alertColor;
-      final double dotY = midY - (lastVal.clamp(-maxG, maxG) / maxG) * (midY - 6);
+      final double dotY =
+          midY - (lastVal.clamp(-maxG, maxG) / maxG) * (midY - 6);
       canvas.drawCircle(Offset(size.width - 2, dotY), 4, dotPaint);
     }
   }

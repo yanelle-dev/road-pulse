@@ -12,7 +12,7 @@
 
     <application
         android:name="${applicationName}"
-        android:label="easyride_app"
+        android:label="Дорожный пульс"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
 

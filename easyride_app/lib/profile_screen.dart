@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'achievement_service.dart';
 import 'api_service.dart';
 import 'app_theme.dart';
 import 'screens/account_screen.dart';
@@ -45,7 +46,6 @@ class ProfileScreen extends StatelessWidget {
               ? "клиренс $clearanceVal мм"
               : "клиренс не указан";
 
-          // Формирование инициалов для аватара
           final parts = name.trim().split(RegExp(r'\s+'));
           String initials = "В";
           if (parts.length >= 2 && parts[0].isNotEmpty && parts[1].isNotEmpty) {
@@ -383,148 +383,202 @@ class ProfileScreen extends StatelessWidget {
   }
 
   Widget _buildAchievements(PolotnoColors colors) {
-    final achievements = [
-      {
-        "icon": Icons.adjust_rounded,
-        "title": "Охотник\nза ямами",
-        "color": colors.s3,
-      },
-      {
-        "icon": Icons.shield_outlined,
-        "title": "Спаситель\nподвесок",
-        "color": colors.markInk,
-      },
-      {
-        "icon": Icons.bolt_rounded,
-        "title": "1 000 км\nза месяц",
-        "color": colors.s1,
-      },
-      {
-        "icon": Icons.nightlight_round,
-        "title": "Ночной\nдозор",
-        "color": colors.ink2,
-      },
-    ];
+    return FutureBuilder<List<Achievement>>(
+      future: AchievementService.getAchievements(),
+      builder: (context, snapshot) {
+        final all = snapshot.data ?? [];
+        final unlockedCount = all.where((a) => a.isUnlocked).length;
 
-    return Padding(
-      padding: const EdgeInsets.only(top: 26),
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  "Достижения",
-                  style: TextStyle(
-                    fontFamily: AppTheme.fontUi,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    color: colors.ink,
-                    letterSpacing: -0.3,
-                  ),
-                ),
-                Text(
-                  "4 из 18",
-                  style: TextStyle(
-                    fontFamily: AppTheme.fontUi,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: colors.markInk,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 11),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Row(
-              children: achievements.map((ach) {
-                return Container(
-                  width: 104,
-                  margin: const EdgeInsets.only(right: 9),
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 15,
-                    horizontal: 11,
-                  ),
-                  decoration: BoxDecoration(
-                    color: colors.surf,
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(color: colors.edge2),
-                  ),
-                  child: Column(
-                    children: [
-                      Container(
-                        width: 38,
-                        height: 38,
+        final displayList = List<Achievement>.from(all)
+          ..sort((a, b) {
+            if (a.isUnlocked != b.isUnlocked) {
+              return a.isUnlocked ? -1 : 1;
+            }
+            return b.progressRatio.compareTo(a.progressRatio);
+          });
+        final topCards = displayList.take(8).toList();
+
+        return Padding(
+          padding: const EdgeInsets.only(top: 26),
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      "Достижения",
+                      style: TextStyle(
+                        fontFamily: AppTheme.fontUi,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: colors.ink,
+                        letterSpacing: -0.3,
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: () => _showAchievementsSheet(context, colors),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 3,
+                        ),
                         decoration: BoxDecoration(
-                          color: colors.surf2,
-                          borderRadius: BorderRadius.circular(13),
+                          color: colors.markSoft,
+                          borderRadius: BorderRadius.circular(999),
                         ),
-                        child: Icon(
-                          ach["icon"] as IconData,
-                          color: ach["color"] as Color,
-                          size: 20,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      Text(
-                        ach["title"] as String,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontFamily: AppTheme.fontUi,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: colors.ink,
-                          height: 1.25,
+                        child: Text(
+                          "$unlockedCount из 30 · ВСЕ",
+                          style: TextStyle(
+                            fontFamily: AppTheme.fontMono,
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w700,
+                            color: colors.markInk,
+                          ),
                         ),
                       ),
-                    ],
-                  ),
-                );
-              }).toList(),
-            ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 11),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Row(
+                  children: topCards.map((ach) {
+                    final isDone = ach.isUnlocked;
+                    return GestureDetector(
+                      onTap: () => _showAchievementsSheet(context, colors),
+                      child: Container(
+                        width: 112,
+                        margin: const EdgeInsets.only(right: 9),
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 13,
+                          horizontal: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: colors.surf,
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(
+                            color: isDone ? colors.mark : colors.edge2,
+                            width: isDone ? 1.5 : 1.0,
+                          ),
+                        ),
+                        child: Column(
+                          children: [
+                            Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                Container(
+                                  width: 40,
+                                  height: 40,
+                                  decoration: BoxDecoration(
+                                    color: isDone
+                                        ? colors.markSoft
+                                        : colors.surf2,
+                                    borderRadius: BorderRadius.circular(13),
+                                  ),
+                                  child: Icon(
+                                    ach.icon,
+                                    color: isDone
+                                        ? colors.markInk
+                                        : colors.ink3,
+                                    size: 21,
+                                  ),
+                                ),
+                                if (isDone)
+                                  Positioned(
+                                    right: -4,
+                                    bottom: -4,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(2),
+                                      decoration: BoxDecoration(
+                                        color: colors.s1,
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: const Icon(
+                                        Icons.check,
+                                        size: 10,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 9),
+                            Text(
+                              ach.title,
+                              textAlign: TextAlign.center,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontFamily: AppTheme.fontUi,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: colors.ink,
+                                height: 1.2,
+                              ),
+                            ),
+                            const SizedBox(height: 7),
+                            if (isDone)
+                              Text(
+                                "ПОЛУЧЕНО",
+                                style: TextStyle(
+                                  fontFamily: AppTheme.fontMono,
+                                  fontSize: 8.5,
+                                  fontWeight: FontWeight.w700,
+                                  color: colors.s1,
+                                ),
+                              )
+                            else ...[
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(999),
+                                child: LinearProgressIndicator(
+                                  value: ach.progressRatio,
+                                  minHeight: 4,
+                                  backgroundColor: colors.surf2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    colors.mark,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                "${ach.current}/${ach.target}",
+                                style: TextStyle(
+                                  fontFamily: AppTheme.fontMono,
+                                  fontSize: 8.5,
+                                  color: colors.ink3,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
+    );
+  }
+
+  void _showAchievementsSheet(BuildContext context, PolotnoColors colors) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _AllAchievementsSheet(colors: colors),
     );
   }
 
   Widget _buildActivityHeatmap(PolotnoColors colors) {
     const days = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"];
-    final pattern = [
-      1,
-      2,
-      1,
-      0,
-      3,
-      2,
-      1,
-      2,
-      3,
-      2,
-      1,
-      3,
-      1,
-      0,
-      1,
-      1,
-      3,
-      2,
-      3,
-      2,
-      2,
-      0,
-      2,
-      1,
-      3,
-      3,
-      1,
-      2,
-    ];
 
     final levels = [
       colors.surf2,
@@ -535,122 +589,445 @@ class ProfileScreen extends StatelessWidget {
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 26, 20, 0),
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      child: FutureBuilder<UserActivityData>(
+        future: ApiService.getActivityData(),
+        builder: (context, snapshot) {
+          final data = snapshot.data ?? UserActivityData.empty();
+          final streakText = _formatStreak(data.streakDays);
+
+          return Column(
             children: [
-              Text(
-                "Активность",
-                style: TextStyle(
-                  fontFamily: AppTheme.fontUi,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: colors.ink,
-                  letterSpacing: -0.3,
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    "Активность",
+                    style: TextStyle(
+                      fontFamily: AppTheme.fontUi,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: colors.ink,
+                      letterSpacing: -0.3,
+                    ),
+                  ),
+                  Text(
+                    streakText,
+                    style: TextStyle(
+                      fontFamily: AppTheme.fontMono,
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 1.1,
+                      color: data.streakDays > 0 ? colors.markInk : colors.ink3,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 11),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: colors.surf,
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: colors.edge2),
+                ),
+                child: Column(
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: days.map((d) {
+                        return SizedBox(
+                          width: 28,
+                          child: Text(
+                            d,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontFamily: AppTheme.fontMono,
+                              fontSize: 9,
+                              fontWeight: FontWeight.w500,
+                              color: colors.ink3,
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 10),
+                    GridView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 7,
+                            crossAxisSpacing: 5,
+                            mainAxisSpacing: 5,
+                          ),
+                      itemCount: 28,
+                      itemBuilder: (context, index) {
+                        final dayItem = index < data.days.length
+                            ? data.days[index]
+                            : null;
+                        final level = dayItem?.level ?? 0;
+                        final count = dayItem?.count ?? 0;
+                        final isToday = dayItem?.isToday ?? false;
+
+                        String tooltipText;
+                        if (dayItem == null || dayItem.isFuture) {
+                          tooltipText = "Будущий день";
+                        } else {
+                          final dateStr =
+                              "${dayItem.date.day.toString().padLeft(2, '0')}.${dayItem.date.month.toString().padLeft(2, '0')}";
+                          if (count == 0) {
+                            tooltipText = "$dateStr: не заходил";
+                          } else {
+                            tooltipText = "$dateStr: ${_formatVisits(count)}";
+                          }
+                          if (isToday) {
+                            tooltipText = "Сегодня ($tooltipText)";
+                          }
+                        }
+
+                        return Tooltip(
+                          message: tooltipText,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: levels[level.clamp(0, 3)],
+                              borderRadius: BorderRadius.circular(6),
+                              border: isToday
+                                  ? Border.all(color: colors.mark, width: 1.5)
+                                  : null,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 13),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          data.totalVisits == 0
+                              ? "НЕТ ВХОДОВ"
+                              : "ВХОДОВ: ${data.totalVisits} (${data.activeDays}/28 ДН)",
+                          style: TextStyle(
+                            fontFamily: AppTheme.fontMono,
+                            fontSize: 8.5,
+                            color: colors.ink3,
+                            letterSpacing: 0.8,
+                          ),
+                        ),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              "РЕЖЕ",
+                              style: TextStyle(
+                                fontFamily: AppTheme.fontMono,
+                                fontSize: 8.5,
+                                color: colors.ink3,
+                                letterSpacing: 0.8,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            ...levels.map(
+                              (c) => Container(
+                                width: 12,
+                                height: 12,
+                                margin: const EdgeInsets.only(right: 3),
+                                decoration: BoxDecoration(
+                                  color: c,
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 3),
+                            Text(
+                              "ЧАЩЕ",
+                              style: TextStyle(
+                                fontFamily: AppTheme.fontMono,
+                                fontSize: 8.5,
+                                color: colors.ink3,
+                                letterSpacing: 0.8,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
-              Text(
-                "28 ДНЕЙ ПОДРЯД",
-                style: TextStyle(
-                  fontFamily: AppTheme.fontMono,
-                  fontSize: 9.5,
-                  fontWeight: FontWeight.w500,
-                  letterSpacing: 1.1,
-                  color: colors.ink3,
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  static String _formatStreak(int streak) {
+    if (streak == 0) return "0 ДНЕЙ";
+    final mod10 = streak % 10;
+    final mod100 = streak % 100;
+    if (mod100 >= 11 && mod100 <= 14) {
+      return "$streak ДНЕЙ ПОДРЯД";
+    }
+    if (mod10 == 1) {
+      return "$streak ДЕНЬ ПОДРЯД";
+    }
+    if (mod10 >= 2 && mod10 <= 4) {
+      return "$streak ДНЯ ПОДРЯД";
+    }
+    return "$streak ДНЕЙ ПОДРЯД";
+  }
+
+  static String _formatVisits(int count) {
+    final mod10 = count % 10;
+    final mod100 = count % 100;
+    if (mod100 >= 11 && mod100 <= 14) {
+      return "$count входов";
+    }
+    if (mod10 == 1) {
+      return "$count вход";
+    }
+    if (mod10 >= 2 && mod10 <= 4) {
+      return "$count входа";
+    }
+    return "$count входов";
+  }
+}
+
+class _AllAchievementsSheet extends StatefulWidget {
+  final PolotnoColors colors;
+
+  const _AllAchievementsSheet({required this.colors});
+
+  @override
+  State<_AllAchievementsSheet> createState() => _AllAchievementsSheetState();
+}
+
+class _AllAchievementsSheetState extends State<_AllAchievementsSheet> {
+  int _activeCategoryIndex = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = widget.colors;
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.88,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      builder: (context, scrollCtrl) {
+        return Container(
+          decoration: BoxDecoration(
+            color: colors.voidBg,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            border: Border(top: BorderSide(color: colors.edge, width: 1)),
+          ),
+          child: Column(
+            children: [
+              Center(
+                child: Container(
+                  width: 38,
+                  height: 5,
+                  margin: const EdgeInsets.symmetric(vertical: 12),
+                  decoration: BoxDecoration(
+                    color: colors.edge,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      "Все 30 достижений",
+                      style: TextStyle(
+                        fontFamily: AppTheme.fontDisplay,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                        color: colors.ink,
+                        letterSpacing: -0.6,
+                      ),
+                    ),
+                    IconButton(
+                      icon: Icon(Icons.close_rounded, color: colors.ink3),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ],
+                ),
+              ),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 14),
+                child: Row(
+                  children: List.generate(
+                    AchievementService.categories.length,
+                    (idx) {
+                      final cat = AchievementService.categories[idx];
+                      final isSel = _activeCategoryIndex == idx;
+                      return GestureDetector(
+                        onTap: () => setState(() => _activeCategoryIndex = idx),
+                        child: Container(
+                          margin: const EdgeInsets.only(right: 8),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 7,
+                          ),
+                          decoration: BoxDecoration(
+                            color: isSel ? colors.mark : colors.surf,
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: isSel ? colors.mark : colors.edge2,
+                            ),
+                          ),
+                          child: Text(
+                            cat,
+                            style: TextStyle(
+                              fontFamily: AppTheme.fontUi,
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
+                              color: isSel ? colors.onMark : colors.ink2,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              Expanded(
+                child: FutureBuilder<List<Achievement>>(
+                  future: AchievementService.getAchievements(),
+                  builder: (context, snapshot) {
+                    final list = snapshot.data ?? [];
+                    final filtered = list.where((a) {
+                      if (_activeCategoryIndex == 0) return true;
+                      final selectedCategory =
+                          AchievementService.categories[_activeCategoryIndex];
+                      return a.category == selectedCategory;
+                    }).toList();
+
+                    return ListView.separated(
+                      controller: scrollCtrl,
+                      padding: const EdgeInsets.fromLTRB(20, 6, 20, 32),
+                      itemCount: filtered.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 10),
+                      itemBuilder: (context, index) {
+                        final ach = filtered[index];
+                        final isDone = ach.isUnlocked;
+
+                        return Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: colors.surf,
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: isDone ? colors.mark : colors.edge2,
+                              width: isDone ? 1.4 : 1.0,
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  color: isDone
+                                      ? colors.markSoft
+                                      : colors.surf2,
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: Icon(
+                                  ach.icon,
+                                  color: isDone ? colors.markInk : colors.ink3,
+                                  size: 22,
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            ach.title,
+                                            style: TextStyle(
+                                              fontFamily: AppTheme.fontUi,
+                                              fontSize: 14.5,
+                                              fontWeight: FontWeight.w700,
+                                              color: colors.ink,
+                                            ),
+                                          ),
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 7,
+                                            vertical: 2,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: isDone
+                                                ? colors.s1Soft
+                                                : colors.surf2,
+                                            borderRadius: BorderRadius.circular(
+                                              999,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            isDone
+                                                ? "ВЫПОЛНЕНО"
+                                                : "${ach.current}/${ach.target}",
+                                            style: TextStyle(
+                                              fontFamily: AppTheme.fontMono,
+                                              fontSize: 9.5,
+                                              fontWeight: FontWeight.w700,
+                                              color: isDone
+                                                  ? colors.s1
+                                                  : colors.ink3,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      ach.description,
+                                      style: TextStyle(
+                                        fontFamily: AppTheme.fontUi,
+                                        fontSize: 12,
+                                        color: colors.ink2,
+                                        height: 1.25,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(999),
+                                      child: LinearProgressIndicator(
+                                        value: ach.progressRatio,
+                                        minHeight: 4,
+                                        backgroundColor: colors.surf2,
+                                        valueColor:
+                                            AlwaysStoppedAnimation<Color>(
+                                              isDone ? colors.s1 : colors.mark,
+                                            ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    );
+                  },
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 11),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: colors.surf,
-              borderRadius: BorderRadius.circular(22),
-              border: Border.all(color: colors.edge2),
-            ),
-            child: Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: days.map((d) {
-                    return SizedBox(
-                      width: 28,
-                      child: Text(
-                        d,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontFamily: AppTheme.fontMono,
-                          fontSize: 9,
-                          fontWeight: FontWeight.w500,
-                          color: colors.ink3,
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                ),
-                const SizedBox(height: 10),
-                GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 7,
-                    crossAxisSpacing: 5,
-                    mainAxisSpacing: 5,
-                  ),
-                  itemCount: 28,
-                  itemBuilder: (context, index) {
-                    return Container(
-                      decoration: BoxDecoration(
-                        color: levels[pattern[index]],
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                    );
-                  },
-                ),
-                const SizedBox(height: 13),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    Text(
-                      "РЕЖЕ",
-                      style: TextStyle(
-                        fontFamily: AppTheme.fontMono,
-                        fontSize: 8.5,
-                        color: colors.ink3,
-                        letterSpacing: 0.8,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    ...levels.map(
-                      (c) => Container(
-                        width: 12,
-                        height: 12,
-                        margin: const EdgeInsets.only(right: 3),
-                        decoration: BoxDecoration(
-                          color: c,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 3),
-                    Text(
-                      "ЧАЩЕ",
-                      style: TextStyle(
-                        fontFamily: AppTheme.fontMono,
-                        fontSize: 8.5,
-                        color: colors.ink3,
-                        letterSpacing: 0.8,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

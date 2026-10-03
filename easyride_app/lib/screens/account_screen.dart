@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../achievement_service.dart';
 import '../api_service.dart';
 import '../app_theme.dart';
 import 'auth_screen.dart';
@@ -17,6 +19,8 @@ class _AccountScreenState extends State<AccountScreen> {
     'name': 'Водитель',
     'city': 'Москва',
     'car_clearance': 0,
+    'car_model': '',
+    'car_tires': '',
   };
 
   @override
@@ -27,6 +31,9 @@ class _AccountScreenState extends State<AccountScreen> {
 
   Future<void> _loadProfile() async {
     final p = await ApiService.getUserProfile();
+    final prefs = await SharedPreferences.getInstance();
+    p['car_model'] = prefs.getString('auth_car_model') ?? '';
+    p['car_tires'] = prefs.getString('auth_car_tires') ?? '';
     if (mounted) {
       setState(() => _profile = p);
     }
@@ -41,6 +48,8 @@ class _AccountScreenState extends State<AccountScreen> {
           ? currentClearance.toString()
           : '',
     );
+    final modelCtrl = TextEditingController(text: _profile['car_model'] ?? '');
+    final tiresCtrl = TextEditingController(text: _profile['car_tires'] ?? '');
 
     await showDialog(
       context: context,
@@ -58,46 +67,74 @@ class _AccountScreenState extends State<AccountScreen> {
               color: colors.ink,
             ),
           ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                style: TextStyle(
-                  fontFamily: AppTheme.fontUi,
-                  color: colors.ink,
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  style: TextStyle(
+                    fontFamily: AppTheme.fontUi,
+                    color: colors.ink,
+                  ),
+                  decoration: InputDecoration(
+                    labelText: "Имя (ФИО)*",
+                    labelStyle: TextStyle(color: colors.ink3),
+                  ),
                 ),
-                decoration: InputDecoration(
-                  labelText: "Имя (ФИО)*",
-                  labelStyle: TextStyle(color: colors.ink3),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: cityCtrl,
+                  style: TextStyle(
+                    fontFamily: AppTheme.fontUi,
+                    color: colors.ink,
+                  ),
+                  decoration: InputDecoration(
+                    labelText: "Город*",
+                    labelStyle: TextStyle(color: colors.ink3),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: cityCtrl,
-                style: TextStyle(
-                  fontFamily: AppTheme.fontUi,
-                  color: colors.ink,
+                const SizedBox(height: 10),
+                TextField(
+                  controller: modelCtrl,
+                  style: TextStyle(
+                    fontFamily: AppTheme.fontUi,
+                    color: colors.ink,
+                  ),
+                  decoration: InputDecoration(
+                    labelText: "Марка и модель авто",
+                    labelStyle: TextStyle(color: colors.ink3),
+                    hintText: "Например, Skoda Octavia",
+                  ),
                 ),
-                decoration: InputDecoration(
-                  labelText: "Город*",
-                  labelStyle: TextStyle(color: colors.ink3),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: tiresCtrl,
+                  style: TextStyle(
+                    fontFamily: AppTheme.fontUi,
+                    color: colors.ink,
+                  ),
+                  decoration: InputDecoration(
+                    labelText: "Параметры шин",
+                    labelStyle: TextStyle(color: colors.ink3),
+                    hintText: "Например, 205/55 R16",
+                  ),
                 ),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: clearanceCtrl,
-                keyboardType: TextInputType.number,
-                style: TextStyle(
-                  fontFamily: AppTheme.fontUi,
-                  color: colors.ink,
+                const SizedBox(height: 10),
+                TextField(
+                  controller: clearanceCtrl,
+                  keyboardType: TextInputType.number,
+                  style: TextStyle(
+                    fontFamily: AppTheme.fontUi,
+                    color: colors.ink,
+                  ),
+                  decoration: InputDecoration(
+                    labelText: "Клиренс (мм), не обязательно",
+                    labelStyle: TextStyle(color: colors.ink3),
+                  ),
                 ),
-                decoration: InputDecoration(
-                  labelText: "Клиренс (мм), не обязательно",
-                  labelStyle: TextStyle(color: colors.ink3),
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
           actions: [
             TextButton(
@@ -117,6 +154,20 @@ class _AccountScreenState extends State<AccountScreen> {
                   return;
                 }
                 final clearance = int.tryParse(clearanceCtrl.text.trim()) ?? 0;
+                final model = modelCtrl.text.trim();
+                final tires = tiresCtrl.text.trim();
+
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setString('auth_car_model', model);
+                await prefs.setString('auth_car_tires', tires);
+
+                // Зачёт достижения «Знаю свою машину»
+                await AchievementService.checkCarProfile(
+                  model: model,
+                  tires: tires,
+                  clearance: clearance,
+                );
+
                 await ApiService.updateProfile(
                   name: name,
                   city: city,
@@ -155,6 +206,10 @@ class _AccountScreenState extends State<AccountScreen> {
     final clearanceStr = (clearanceVal is int && clearanceVal > 0)
         ? "клиренс $clearanceVal мм"
         : "клиренс не указан";
+    final carModel = _profile['car_model'] as String? ?? '';
+    final carSubtitle = carModel.isNotEmpty
+        ? "${_profile['city']} · $carModel · $clearanceStr"
+        : "${_profile['city']} · $clearanceStr";
 
     return Scaffold(
       backgroundColor: colors.voidBg,
@@ -214,7 +269,7 @@ class _AccountScreenState extends State<AccountScreen> {
                   colors: colors,
                   icon: Icons.person_outline_rounded,
                   title: _profile['name'] ?? 'Водитель',
-                  subtitle: "${_profile['city']} · $clearanceStr",
+                  subtitle: carSubtitle,
                   trailing: Icon(
                     Icons.edit_outlined,
                     color: colors.markInk,

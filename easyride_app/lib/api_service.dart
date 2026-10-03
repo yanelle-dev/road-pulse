@@ -26,9 +26,57 @@ class VerifyResult {
   });
 }
 
+/// Модель одного дня для теплокарты активности
+class DayActivity {
+  final DateTime date;
+  final int count;
+  final int level; // 0: 0 входов, 1: 1-2 входа, 2: 3-5 входов, 3: 6+ входов
+  final bool isToday;
+  final bool isFuture;
+
+  const DayActivity({
+    required this.date,
+    required this.count,
+    required this.level,
+    required this.isToday,
+    required this.isFuture,
+  });
+}
+
+/// Агрегированные данные активности за 28 дней
+class UserActivityData {
+  final List<DayActivity> days;
+  final int streakDays;
+  final int totalVisits;
+  final int activeDays;
+
+  const UserActivityData({
+    required this.days,
+    required this.streakDays,
+    required this.totalVisits,
+    required this.activeDays,
+  });
+
+  factory UserActivityData.empty() {
+    return UserActivityData(
+      days: List.generate(
+        28,
+        (i) => DayActivity(
+          date: DateTime.now(),
+          count: 0,
+          level: 0,
+          isToday: false,
+          isFuture: false,
+        ),
+      ),
+      streakDays: 0,
+      totalVisits: 0,
+      activeDays: 0,
+    );
+  }
+}
+
 class ApiService {
-  // 10.0.2.2 — адрес хоста для Android Emulator.
-  // На сервере замените на: http://31.77.105.240:8001/api/v1           http://10.0.2.2:8000/api/v1
   static const String baseUrl = 'http://31.77.105.240:8001/api/v1';
   static const String apiUrl = '$baseUrl/telemetry';
 
@@ -40,6 +88,7 @@ class ApiService {
   static const String _keyUserName = 'auth_user_name';
   static const String _keyUserCity = 'auth_user_city';
   static const String _keyUserClearance = 'auth_user_clearance';
+  static const String _keyActivityVisits = 'user_activity_visits';
 
   static void addLog(String raw) {
     final time = DateTime.now().toString().split(' ').last.substring(0, 8);
@@ -54,6 +103,137 @@ class ApiService {
       _ => LogKind.ok,
     };
     logs.value = [LogEntry(time, message, kind), ...logs.value];
+  }
+
+  // --- МЕТОДЫ АКТИВНОСТИ ПОЛЬЗОВАТЕЛЯ (ЛОКАЛЬНО) ---
+
+  static String _formatDateKey(DateTime dt) {
+    final y = dt.year.toString().padLeft(4, '0');
+    final m = dt.month.toString().padLeft(2, '0');
+    final d = dt.day.toString().padLeft(2, '0');
+    return '$y-$m-$d';
+  }
+
+  /// Фиксация входа в приложение
+  static Future<void> recordAppOpen() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_keyActivityVisits);
+      Map<String, int> visits = {};
+
+      if (raw != null && raw.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(raw) as Map<String, dynamic>;
+          visits = decoded.map((k, v) => MapEntry(k, (v as num).toInt()));
+        } catch (_) {}
+      }
+
+      final todayKey = _formatDateKey(DateTime.now());
+      visits[todayKey] = (visits[todayKey] ?? 0) + 1;
+
+      final cutoff = DateTime.now().subtract(const Duration(days: 90));
+      visits.removeWhere((key, _) {
+        try {
+          return DateTime.parse(key).isBefore(cutoff);
+        } catch (_) {
+          return true;
+        }
+      });
+
+      await prefs.setString(_keyActivityVisits, jsonEncode(visits));
+    } catch (e) {
+      debugPrint("Ошибка сохранения активности: $e");
+    }
+  }
+
+  /// Получение структуры данных для теплокарты
+  static Future<UserActivityData> getActivityData() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_keyActivityVisits);
+      Map<String, int> visits = {};
+
+      if (raw != null && raw.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(raw) as Map<String, dynamic>;
+          visits = decoded.map((k, v) => MapEntry(k, (v as num).toInt()));
+        } catch (_) {}
+      }
+
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      final todayKey = _formatDateKey(today);
+
+      if (!visits.containsKey(todayKey)) {
+        visits[todayKey] = 1;
+        await prefs.setString(_keyActivityVisits, jsonEncode(visits));
+      }
+
+      final currentWeekMonday = today.subtract(
+        Duration(days: today.weekday - 1),
+      );
+      final gridStartDate = currentWeekMonday.subtract(
+        const Duration(days: 21),
+      );
+
+      final List<DayActivity> days = [];
+      int totalVisits = 0;
+      int activeDays = 0;
+
+      for (int i = 0; i < 28; i++) {
+        final cellDate = gridStartDate.add(Duration(days: i));
+        final key = _formatDateKey(cellDate);
+        final isFuture = cellDate.isAfter(today);
+        final count = isFuture ? 0 : (visits[key] ?? 0);
+
+        int level = 0;
+        if (count >= 6) {
+          level = 3;
+        } else if (count >= 3) {
+          level = 2;
+        } else if (count >= 1) {
+          level = 1;
+        }
+
+        if (count > 0) {
+          totalVisits += count;
+          activeDays++;
+        }
+
+        days.add(
+          DayActivity(
+            date: cellDate,
+            count: count,
+            level: level,
+            isToday: key == todayKey,
+            isFuture: isFuture,
+          ),
+        );
+      }
+
+      int streak = 0;
+      DateTime checkDate = today;
+      while (true) {
+        final key = _formatDateKey(checkDate);
+        final count = visits[key] ?? 0;
+        if (count > 0) {
+          streak++;
+          checkDate = checkDate.subtract(const Duration(days: 1));
+        } else {
+          break;
+        }
+      }
+
+      return UserActivityData(
+        days: days,
+        streakDays: streak,
+        totalVisits: totalVisits,
+        activeDays: activeDays,
+      );
+    } catch (e) {
+      debugPrint("Ошибка получения активности: $e");
+      return UserActivityData.empty();
+    }
   }
 
   // --- МЕТОДЫ АВТОРИЗАЦИИ И ПРОФИЛЯ ---
@@ -106,7 +286,6 @@ class ApiService {
             clearance is int ? clearance : 0,
           );
 
-          // Если имя и город уже сохранены в базе, считаем пользователя существующим
           if (name.isNotEmpty && city.isNotEmpty) {
             isNew = false;
           }

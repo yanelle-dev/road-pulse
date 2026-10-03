@@ -5,7 +5,7 @@ description:
 
 publish_to: 'none'
 
-version: 1.2.0+16
+version: 1.2.1+17
 
 environment:
   sdk: ^3.12.2
@@ -28,7 +28,7 @@ dependencies:
   http: ^1.6.0
   flutter_map: ^8.3.0
   latlong2: ^0.10.1
-  flutter_foreground_task: ^10.0.0
+  flutter_foreground_task: ^11.0.3
   shared_preferences: ^2.2.2
   geocoding: ^5.0.0
 
@@ -42,6 +42,7 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.3
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -79,3 +80,10 @@ flutter:
           weight: 400
         - asset: assets/fonts/JetBrainsMono-Regular.ttf
           weight: 500
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: 'assets/icon/logo.png'
+  adaptive_icon_background: '#0E1B2E'
+  adaptive_icon_foreground: 'assets/icon/logo.png'
