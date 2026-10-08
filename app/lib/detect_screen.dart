@@ -25,9 +25,12 @@ class _DetectScreenState extends State<DetectScreen> {
   StreamSubscription<UserAccelerometerEvent>? _accelStream;
 
   double _currentSpeed = 0.0;
+  double _tripDistanceMeters = 0.0;
+  double _pendingSyncMeters = 0.0;
+  Position? _lastPos;
+
   final int _maxDataPoints = 60;
   List<double> _accelData = [];
-  Position? _lastPosition;
 
   @override
   void initState() {
@@ -58,35 +61,46 @@ class _DetectScreenState extends State<DetectScreen> {
   }
 
   void _initSensors() {
-    _positionStream =
-        Geolocator.getPositionStream(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.high,
-            distanceFilter: 2,
-          ),
-        ).listen((Position position) {
-          if (mounted) {
-            final speedKmh = (position.speed * 3.6).clamp(0.0, 999.0);
+    _positionStream = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 1, // Чувствительность 1 метр
+      ),
+    ).listen((Position position) {
+      if (!mounted) return;
 
-            // Накопление фонового километража для достижений при скорости >= 20 км/ч
-            if (_isActive && speedKmh >= 20.0 && _lastPosition != null) {
-              final distanceM = Geolocator.distanceBetween(
-                _lastPosition!.latitude,
-                _lastPosition!.longitude,
-                position.latitude,
-                position.longitude,
-              );
-              if (distanceM > 0 && distanceM < 500) {
-                AchievementService.addDistanceMeters(distanceM);
-              }
-            }
-            _lastPosition = position;
+      final gpsSpeedKmh = (position.speed * 3.6).clamp(0.0, 999.0);
 
-            setState(() {
-              _currentSpeed = speedKmh;
-            });
+      if (_isActive && _lastPos != null && position.accuracy <= 80.0) {
+        final distanceM = Geolocator.distanceBetween(
+          _lastPos!.latitude,
+          _lastPos!.longitude,
+          position.latitude,
+          position.longitude,
+        );
+
+        // Фиксация любого реального шага (от 0.6 м до 300 м)
+        if (distanceM >= 0.6 && distanceM < 300.0) {
+          _tripDistanceMeters += distanceM;
+          _pendingSyncMeters += distanceM;
+
+          AchievementService.addDistanceMeters(distanceM);
+
+          // Логирование в журнал каждые 15 м
+          if (_pendingSyncMeters >= 15.0) {
+            final toSend = _pendingSyncMeters;
+            _pendingSyncMeters = 0.0;
+            ApiService.sendDistance(toSend);
+            ApiService.addLog("🟢 Шаг зафиксирован: +${toSend.toStringAsFixed(0)} м (всего: ${_tripDistanceMeters.toStringAsFixed(0)} м)");
           }
-        });
+        }
+      }
+      _lastPos = position;
+
+      setState(() {
+        _currentSpeed = gpsSpeedKmh;
+      });
+    });
 
     _accelStream = userAccelerometerEventStream().listen((
       UserAccelerometerEvent event,
@@ -110,9 +124,7 @@ class _DetectScreenState extends State<DetectScreen> {
         _toggleTracking();
       }
     } else {
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
       Navigator.push(
         context,
         MaterialPageRoute(
@@ -161,10 +173,15 @@ class _DetectScreenState extends State<DetectScreen> {
     try {
       if (_isActive) {
         ApiService.addLog("Остановка службы мониторинга");
+        if (_pendingSyncMeters > 0) {
+          final toSend = _pendingSyncMeters;
+          _pendingSyncMeters = 0.0;
+          await ApiService.sendDistance(toSend);
+        }
         await FlutterForegroundTask.stopService();
         setState(() => _isActive = false);
       } else {
-        ApiService.addLog("Запуск фоновой службы Road Pulse");
+        ApiService.addLog("🟢 Мониторинг запущен. Одометр активен");
         if (await FlutterForegroundTask.isRunningService) {
           await FlutterForegroundTask.stopService();
         }
@@ -173,10 +190,15 @@ class _DetectScreenState extends State<DetectScreen> {
           notificationText: 'Служба записи дорожного покрытия активна',
           callback: startCallback,
         );
-        setState(() => _isActive = true);
+        setState(() {
+          _isActive = true;
+          _tripDistanceMeters = 0.0;
+          _pendingSyncMeters = 0.0;
+          _lastPos = null;
+        });
       }
     } catch (e) {
-      ApiService.addLog("Ошибка переключения службы: $e");
+      ApiService.addLog("Ошибка службы: $e");
     }
   }
 
@@ -197,6 +219,7 @@ class _DetectScreenState extends State<DetectScreen> {
               children: [
                 _buildHeader(colors),
                 _buildSpeedometer(colors),
+                _buildOdometerCard(colors),
                 _buildGateBanner(colors),
                 _buildScope(colors),
                 _buildTerminal(colors),
@@ -264,7 +287,7 @@ class _DetectScreenState extends State<DetectScreen> {
     final int speedInt = _currentSpeed.round();
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
       child: Center(
         child: Column(
           children: [
@@ -274,7 +297,7 @@ class _DetectScreenState extends State<DetectScreen> {
                 "$speedInt",
                 style: TextStyle(
                   fontFamily: AppTheme.fontDisplay,
-                  fontSize: 120,
+                  fontSize: 110,
                   fontWeight: FontWeight.w800,
                   color: colors.ink,
                   height: 0.85,
@@ -282,9 +305,9 @@ class _DetectScreenState extends State<DetectScreen> {
                 ),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
             Text(
-              "КМ/Ч · ПОРОГ ЗАПИСИ 20",
+              "КМ/Ч · ТЕКУЩАЯ СКОРОСТЬ",
               style: TextStyle(
                 fontFamily: AppTheme.fontMono,
                 fontSize: 10,
@@ -299,12 +322,57 @@ class _DetectScreenState extends State<DetectScreen> {
     );
   }
 
+  Widget _buildOdometerCard(PolotnoColors colors) {
+    final kmStr = (_tripDistanceMeters / 1000.0).toStringAsFixed(2);
+    final mStr = _tripDistanceMeters.toStringAsFixed(0);
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: colors.surf,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: colors.edge2),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.route_rounded, color: colors.mark, size: 20),
+              const SizedBox(width: 10),
+              Text(
+                "ПРОБЕГ ЗА ПОЕЗДКУ",
+                style: TextStyle(
+                  fontFamily: AppTheme.fontMono,
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.0,
+                  color: colors.ink2,
+                ),
+              ),
+            ],
+          ),
+          Text(
+            "$kmStr км ($mStr м)",
+            style: TextStyle(
+              fontFamily: AppTheme.fontMono,
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: _isActive ? colors.s1 : colors.ink,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildGateBanner(PolotnoColors colors) {
     final bool isAboveThreshold = _currentSpeed >= 20.0;
 
     return Container(
-      margin: const EdgeInsets.fromLTRB(20, 16, 20, 0),
-      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 13),
+      margin: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 12),
       decoration: BoxDecoration(
         color: isAboveThreshold ? colors.s1Soft : colors.surf,
         borderRadius: BorderRadius.circular(16),
@@ -328,29 +396,26 @@ class _DetectScreenState extends State<DetectScreen> {
               TextSpan(
                 style: TextStyle(
                   fontFamily: AppTheme.fontUi,
-                  fontSize: 12.5,
+                  fontSize: 12.0,
                   color: colors.ink2,
-                  height: 1.45,
+                  height: 1.4,
                 ),
                 children: isAboveThreshold
                     ? [
-                        const TextSpan(text: "Скорость выше порога — "),
+                        const TextSpan(text: "Скорость выше 20 км/ч — "),
                         TextSpan(
-                          text: "удары записываются",
+                          text: "удары ям записываются",
                           style: TextStyle(
                             color: colors.ink,
                             fontWeight: FontWeight.w700,
                           ),
                         ),
-                        const TextSpan(
-                          text:
-                              ". При снижении ниже 20 км/ч детекция замирает автоматически.",
-                        ),
+                        const TextSpan(text: "."),
                       ]
                     : [
                         const TextSpan(
                           text:
-                              "Скорость ниже порога 20 км/ч. Дворы и пробки отсекаются, чтобы избежать ложных срабатываний.",
+                              "Пробег пишется на любой скорости (пешком и авто). Запись ударов полотна включится от 20 км/ч.",
                         ),
                       ],
               ),
@@ -365,8 +430,8 @@ class _DetectScreenState extends State<DetectScreen> {
     final double currentZ = _accelData.isNotEmpty ? _accelData.last : 0.0;
 
     return Container(
-      height: 156,
-      margin: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+      height: 140,
+      margin: const EdgeInsets.fromLTRB(20, 10, 20, 0),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: colors.surf,
@@ -418,9 +483,9 @@ class _DetectScreenState extends State<DetectScreen> {
 
   Widget _buildTerminal(PolotnoColors colors) {
     return Container(
-      height: 190,
-      margin: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-      padding: const EdgeInsets.all(16),
+      height: 170,
+      margin: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: colors.term,
         borderRadius: BorderRadius.circular(20),
@@ -445,7 +510,7 @@ class _DetectScreenState extends State<DetectScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           Expanded(
             child: ValueListenableBuilder(
               valueListenable: ApiService.logs,
@@ -453,7 +518,7 @@ class _DetectScreenState extends State<DetectScreen> {
                 if (logs.isEmpty) {
                   return Center(
                     child: Text(
-                      "Ожидание событий датчиков...",
+                      "Ожидание первого движения...",
                       style: TextStyle(
                         fontFamily: AppTheme.fontMono,
                         fontSize: 11,
@@ -470,7 +535,6 @@ class _DetectScreenState extends State<DetectScreen> {
                   itemCount: displayLogs.length,
                   itemBuilder: (context, index) {
                     final dynamic entry = displayLogs[index];
-
                     String time = '';
                     String message = '';
                     String kind = '';
@@ -481,67 +545,31 @@ class _DetectScreenState extends State<DetectScreen> {
                       final dynamic d = entry;
                       try {
                         final t = d.time;
-                        if (t != null) {
-                          time = t.toString();
-                        }
+                        if (t != null) time = t.toString();
                       } catch (_) {}
-                      if (time.isEmpty) {
-                        try {
-                          final ts = d.timestamp;
-                          if (ts is DateTime) {
-                            time =
-                                '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}';
-                          } else if (ts != null) {
-                            time = ts.toString();
-                          }
-                        } catch (_) {}
-                      }
-
                       try {
                         final m = d.message;
-                        if (m != null && m.toString().isNotEmpty) {
-                          message = m.toString();
-                        }
+                        if (m != null) message = m.toString();
                       } catch (_) {}
-                      if (message.isEmpty) {
-                        try {
-                          final txt = d.text;
-                          if (txt != null && txt.toString().isNotEmpty) {
-                            message = txt.toString();
-                          }
-                        } catch (_) {}
-                      }
-                      if (message.isEmpty) {
-                        message = entry.toString();
-                      }
-
+                      if (message.isEmpty) message = entry.toString();
                       try {
-                        final k = d.kind ?? d.level ?? d.type;
-                        if (k != null) {
-                          kind = k.toString().toLowerCase();
-                        }
+                        final k = d.kind ?? d.level;
+                        if (k != null) kind = k.toString().toLowerCase();
                       } catch (_) {}
                     }
 
                     Color textColor = const Color(0xFF98A1A8);
                     final lowerMsg = message.toLowerCase();
-                    if (kind == 'hit' ||
-                        lowerMsg.contains('удар') ||
-                        lowerMsg.contains('дефект')) {
+                    if (kind == 'hit' || lowerMsg.contains('удар')) {
                       textColor = colors.s3;
-                    } else if (kind == 'ok' ||
-                        lowerMsg.contains('fix') ||
-                        lowerMsg.contains('служба') ||
-                        lowerMsg.contains('подтверждён')) {
+                    } else if (kind == 'ok' || lowerMsg.contains('зафиксирован') || lowerMsg.contains('пройдено') || lowerMsg.contains('актив')) {
                       textColor = colors.s1;
-                    } else if (kind == 'warn' ||
-                        lowerMsg.contains('порог') ||
-                        lowerMsg.contains('пауза')) {
+                    } else if (kind == 'warn' || lowerMsg.contains('пауз')) {
                       textColor = colors.mark;
                     }
 
                     return Padding(
-                      padding: const EdgeInsets.only(bottom: 6.0),
+                      padding: const EdgeInsets.only(bottom: 5.0),
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
@@ -552,7 +580,7 @@ class _DetectScreenState extends State<DetectScreen> {
                                 time,
                                 style: TextStyle(
                                   fontFamily: AppTheme.fontMono,
-                                  fontSize: 11,
+                                  fontSize: 10.5,
                                   color: colors.ink3,
                                 ),
                               ),
@@ -564,7 +592,7 @@ class _DetectScreenState extends State<DetectScreen> {
                               message,
                               style: TextStyle(
                                 fontFamily: AppTheme.fontMono,
-                                fontSize: 11,
+                                fontSize: 10.5,
                                 color: textColor,
                                 height: 1.3,
                               ),
@@ -587,10 +615,10 @@ class _DetectScreenState extends State<DetectScreen> {
 
   Widget _buildActionButton(PolotnoColors colors) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
       child: ElevatedButton(
         style: ElevatedButton.styleFrom(
-          minimumSize: const Size.fromHeight(56),
+          minimumSize: const Size.fromHeight(54),
           backgroundColor: _isActive ? colors.s3 : colors.mark,
           foregroundColor: _isActive ? Colors.white : colors.onMark,
           elevation: 0,
@@ -603,7 +631,7 @@ class _DetectScreenState extends State<DetectScreen> {
           _isActive ? "Остановить запись" : "Запустить запись",
           style: TextStyle(
             fontFamily: AppTheme.fontUi,
-            fontSize: 16.5,
+            fontSize: 16.0,
             fontWeight: FontWeight.w700,
             letterSpacing: -0.3,
           ),
@@ -639,22 +667,10 @@ class PolotnoScopePainter extends CustomPainter {
     final double yThresholdTop = midY - (7.0 / maxG) * (midY - 4);
     final double yThresholdBottom = midY + (7.0 / maxG) * (midY - 4);
 
-    _drawDashedLine(
-      canvas,
-      Offset(0, yThresholdTop),
-      Offset(size.width, yThresholdTop),
-      gridPaint,
-    );
-    _drawDashedLine(
-      canvas,
-      Offset(0, yThresholdBottom),
-      Offset(size.width, yThresholdBottom),
-      gridPaint,
-    );
+    _drawDashedLine(canvas, Offset(0, yThresholdTop), Offset(size.width, yThresholdTop), gridPaint);
+    _drawDashedLine(canvas, Offset(0, yThresholdBottom), Offset(size.width, yThresholdBottom), gridPaint);
 
-    if (data.length < 2) {
-      return;
-    }
+    if (data.length < 2) return;
 
     final linePaint = Paint()
       ..color = lineColor
@@ -682,8 +698,7 @@ class PolotnoScopePainter extends CustomPainter {
     final double lastVal = data.last;
     if (lastVal.abs() >= 4.0) {
       final dotPaint = Paint()..color = alertColor;
-      final double dotY =
-          midY - (lastVal.clamp(-maxG, maxG) / maxG) * (midY - 6);
+      final double dotY = midY - (lastVal.clamp(-maxG, maxG) / maxG) * (midY - 6);
       canvas.drawCircle(Offset(size.width - 2, dotY), 4, dotPaint);
     }
   }

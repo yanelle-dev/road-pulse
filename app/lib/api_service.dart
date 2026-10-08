@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'achievement_service.dart';
+
 enum LogKind { ok, hit, warn }
 
 class LogEntry {
@@ -30,7 +32,7 @@ class VerifyResult {
 class DayActivity {
   final DateTime date;
   final int count;
-  final int level; // 0: 0 входов, 1: 1-2 входа, 2: 3-5 входов, 3: 6+ входов
+  final int level;
   final bool isToday;
   final bool isFuture;
 
@@ -76,6 +78,36 @@ class UserActivityData {
   }
 }
 
+/// Пользовательская статистика для экрана профиля
+class UserStats {
+  final double totalKm;
+  final int totalDefects;
+  final int rating;
+  final int savedSuspensions;
+  final int unlockedAchievements;
+  final int streakDays;
+
+  const UserStats({
+    required this.totalKm,
+    required this.totalDefects,
+    required this.rating,
+    required this.savedSuspensions,
+    required this.unlockedAchievements,
+    required this.streakDays,
+  });
+
+  factory UserStats.empty() {
+    return const UserStats(
+      totalKm: 0.0,
+      totalDefects: 0,
+      rating: 0,
+      savedSuspensions: 0,
+      unlockedAchievements: 0,
+      streakDays: 0,
+    );
+  }
+}
+
 class ApiService {
   static const String baseUrl = 'http://31.77.105.240:8001/api/v1';
   static const String apiUrl = '$baseUrl/telemetry';
@@ -89,6 +121,7 @@ class ApiService {
   static const String _keyUserCity = 'auth_user_city';
   static const String _keyUserClearance = 'auth_user_clearance';
   static const String _keyActivityVisits = 'user_activity_visits';
+  static const String _keyDefectsCount = 'user_defects_count';
 
   static void addLog(String raw) {
     final time = DateTime.now().toString().split(' ').last.substring(0, 8);
@@ -105,6 +138,55 @@ class ApiService {
     logs.value = [LogEntry(time, message, kind), ...logs.value];
   }
 
+  // --- МЕТОДЫ УЧЁТА ДЕФЕКТОВ И РАСЧЁТА РЕЙТИНГА ---
+
+  static Future<int> getDefectsCount() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_keyDefectsCount) ?? 0;
+  }
+
+  static Future<void> incrementDefectsCount([int delta = 1]) async {
+    final prefs = await SharedPreferences.getInstance();
+    final current = prefs.getInt(_keyDefectsCount) ?? 0;
+    final next = current + delta;
+    await prefs.setInt(_keyDefectsCount, next);
+    await AchievementService.syncDefectsProgress(next);
+  }
+
+  /// Получение сводной статистики и расчёт рейтинга по регламентной формуле
+  static Future<UserStats> getUserStats() async {
+    try {
+      final totalKm = await AchievementService.getTotalDistanceKm();
+      final totalDefects = await getDefectsCount();
+
+      final activity = await getActivityData();
+      final streakDays = activity.streakDays;
+
+      final achievements = await AchievementService.getAchievements();
+      final unlockedAchievements = achievements.where((a) => a.isUnlocked).length;
+
+      // Формула: (Км * 10) + (Дефекты * 50) + (Награды * 100) + (Серия * 20)
+      final rating = (totalKm * 10).round() +
+          (totalDefects * 50) +
+          (unlockedAchievements * 100) +
+          (streakDays * 20);
+
+      final savedSuspensions = (totalDefects * 0.15).ceil();
+
+      return UserStats(
+        totalKm: totalKm,
+        totalDefects: totalDefects,
+        rating: rating,
+        savedSuspensions: savedSuspensions,
+        unlockedAchievements: unlockedAchievements,
+        streakDays: streakDays,
+      );
+    } catch (e) {
+      debugPrint("Ошибка расчёта статистики: $e");
+      return UserStats.empty();
+    }
+  }
+
   // --- МЕТОДЫ АКТИВНОСТИ ПОЛЬЗОВАТЕЛЯ (ЛОКАЛЬНО) ---
 
   static String _formatDateKey(DateTime dt) {
@@ -114,7 +196,6 @@ class ApiService {
     return '$y-$m-$d';
   }
 
-  /// Фиксация входа в приложение
   static Future<void> recordAppOpen() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -146,7 +227,6 @@ class ApiService {
     }
   }
 
-  /// Получение структуры данных для теплокарты
   static Future<UserActivityData> getActivityData() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -368,8 +448,32 @@ class ApiService {
     await prefs.remove(_keyUserClearance);
   }
 
-  // --- ТЕЛЕМЕТРИЯ ---
+// --- ТЕЛЕМЕТРИЯ ДЕФЕКТОВ И ДИСТАНЦИИ ---
 
+  /// Отправка пачки пройденных метров на сервер (любая скорость)
+  static Future<bool> sendDistance(double meters) async {
+    if (meters <= 0) return true;
+    try {
+      final token = await getAccessToken();
+      final headers = <String, String>{'Content-Type': 'application/json'};
+      if (token != null && token.isNotEmpty) {
+        headers['Authorization'] = 'Bearer $token';
+      }
+
+      final response = await http.post(
+        Uri.parse('$baseUrl/telemetry/distance'),
+        headers: headers,
+        body: jsonEncode({
+          'distance_meters': meters,
+        }),
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint("Ошибка отправки дистанции на сервер: $e");
+      return false;
+    }
+  }
+  /// Отправка дефекта: счётчик инкрементируется ТОЛЬКО при успешном ответе HTTP 200
   static Future<bool> sendDefect({
     required double lat,
     required double lon,
@@ -399,7 +503,12 @@ class ApiService {
           'trajectory': trajectory,
         }),
       );
-      return response.statusCode == 200;
+
+      if (response.statusCode == 200) {
+        await incrementDefectsCount(1);
+        return true;
+      }
+      return false;
     } catch (e) {
       return false;
     }

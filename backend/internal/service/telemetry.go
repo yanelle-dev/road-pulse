@@ -204,3 +204,33 @@ func (s *TelemetryService) GetClusters(ctx context.Context) ([]models.TelemetryC
 
 	return results, nil
 }
+
+// RecordDistance атомарно сохраняет пройденную дистанцию в БД
+func (s *TelemetryService) RecordDistance(ctx context.Context, userID string, meters float64) (*models.DistanceResponse, error) {
+	if meters <= 0 {
+		return &models.DistanceResponse{
+			Status:      "ok",
+			AddedMeters: 0,
+		}, nil
+	}
+
+	var total float64
+	if userID != "" && userID != "anonymous" {
+		query := `
+			UPDATE users
+			SET total_distance_meters = COALESCE(total_distance_meters, 0) + $1
+			WHERE id = $2
+			RETURNING total_distance_meters;
+		`
+		err := s.pool.QueryRow(ctx, query, meters, userID).Scan(&total)
+		if err != nil {
+			return nil, fmt.Errorf("ошибка обновления пробега пользователя: %w", err)
+		}
+	}
+
+	return &models.DistanceResponse{
+		Status:              "ok",
+		AddedMeters:         meters,
+		TotalDistanceMeters: total,
+	}, nil
+}

@@ -301,12 +301,7 @@ class AchievementService {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_keyProgress);
     if (raw == null || raw.isEmpty) {
-      final initial = <String, int>{
-        'first_km': 1,
-        'first_find': 1,
-        'sharp_eye': 4,
-        'thousand': 46,
-      };
+      final initial = <String, int>{};
       await prefs.setString(_keyProgress, jsonEncode(initial));
       return initial;
     }
@@ -335,6 +330,16 @@ class AchievementService {
       }
     } catch (_) {}
 
+    // Автоматическая сверка наград по дефектам
+    try {
+      final defCount = await ApiService.getDefectsCount();
+      if (defCount > 0) {
+        progress['first_find'] = 1;
+        progress['sharp_eye'] = defCount;
+        progress['road_scanner'] = defCount;
+      }
+    } catch (_) {}
+
     return _catalog.map((item) {
       final id = item['id'] as String;
       final target = item['target'] as int;
@@ -353,6 +358,18 @@ class AchievementService {
     }).toList();
   }
 
+  /// Получение общего накопленного расстояния в метрах
+  static Future<double> getTotalDistanceMeters() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getDouble(_keyDistanceMeters) ?? 0.0;
+  }
+
+  /// Получение общего накопленного расстояния в километрах
+  static Future<double> getTotalDistanceKm() async {
+    final meters = await getTotalDistanceMeters();
+    return meters / 1000.0;
+  }
+
   /// Накопление пройденного километража (вызывается из DetectScreen)
   static Future<void> addDistanceMeters(double meters) async {
     if (meters <= 0) return;
@@ -367,6 +384,17 @@ class AchievementService {
       progress['first_km'] = 1;
     }
     progress['thousand'] = totalKm;
+    await _saveRawProgress(progress);
+  }
+
+  /// Синхронизация достижений при успешной отправке ямы на сервер
+  static Future<void> syncDefectsProgress(int count) async {
+    final progress = await _loadRawProgress();
+    if (count >= 1) {
+      progress['first_find'] = 1;
+    }
+    progress['sharp_eye'] = count;
+    progress['road_scanner'] = count;
     await _saveRawProgress(progress);
   }
 

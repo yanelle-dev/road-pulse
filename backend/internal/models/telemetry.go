@@ -39,3 +39,13 @@ type TelemetryCluster struct {
 	DefectType         string  `json:"defect_type"`
 	InfrastructureType string  `json:"infrastructure_type"`
 }
+
+type DistancePayload struct {
+	DistanceMeters float64 `json:"distance_meters"`
+}
+
+type DistanceResponse struct {
+	Status              string  `json:"status"`
+	AddedMeters         float64 `json:"added_meters"`
+	TotalDistanceMeters float64 `json:"total_distance_meters"`
+}

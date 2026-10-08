@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../achievement_service.dart';
@@ -23,10 +24,31 @@ class _AccountScreenState extends State<AccountScreen> {
     'car_tires': '',
   };
 
+  String _appVersionString = 'Дорожный пульс';
+
   @override
   void initState() {
     super.initState();
     _loadProfile();
+    _loadAppVersion();
+  }
+
+  Future<void> _loadAppVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (mounted) {
+        setState(() {
+          _appVersionString =
+              'Дорожный пульс ${info.version} · сборка ${info.buildNumber}';
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _appVersionString = 'Дорожный пульс 1.3.0 · сборка 18';
+        });
+      }
+    }
   }
 
   Future<void> _loadProfile() async {
@@ -161,7 +183,6 @@ class _AccountScreenState extends State<AccountScreen> {
                 await prefs.setString('auth_car_model', model);
                 await prefs.setString('auth_car_tires', tires);
 
-                // Зачёт достижения «Знаю свою машину»
                 await AchievementService.checkCarProfile(
                   model: model,
                   tires: tires,
@@ -348,7 +369,7 @@ class _AccountScreenState extends State<AccountScreen> {
             const SizedBox(height: 28),
             Center(
               child: Text(
-                "Дорожный пульс 2.0 · сборка 16",
+                _appVersionString,
                 style: TextStyle(
                   fontFamily: AppTheme.fontMono,
                   fontSize: 11.5,

@@ -82,7 +82,7 @@ backend/
 ├── cmd/api/main.go                  # сборка зависимостей, chi-роутер, graceful shutdown
 ├── internal/config/config.go        # Config + Load() из ENV
 ├── internal/database/database.go    # пул pgx, применение схемы
-├── internal/models/telemetry.go     # DTO телеметрии
+├── internal/models/telemetry.go     # DTO телеметрии и пробега
 ├── internal/models/auth.go          # DTO авторизации и профиля
 ├── internal/osrm/client.go          # HTTP-клиент OSRM
 ├── internal/service/telemetry.go    # бизнес-логика дефектов
@@ -105,7 +105,7 @@ backend/
 | `GET /health` | inline handler | `SELECT PostGIS_Version()`; `200 {status, postgis}` либо `503 {detail}` |
 | Роутер | `chi.Router` | `middleware.Logger`, `middleware.Recoverer` |
 | Роуты `/api/v1/auth` | group | `request-code`, `verify-code`, `refresh`; под `RequireAuth` — `GET`/`PATCH /me` |
-| Роут `/api/v1/telemetry` | group | `POST` под `OptionalAuth`, `GET` без авторизации |
+| Роут `/api/v1/telemetry` | group | `POST` и `POST /distance` под `OptionalAuth`, `GET` без авторизации |
 
 ### internal/config/config.go
 
@@ -126,7 +126,7 @@ backend/
 | Таблица | Ключевые поля |
 |---------|---------------|
 | `telemetry` | `id`, `user_id`, `location GEOMETRY(Geometry,4326)`, `speed_kmh`, `bump_force`, `defect_type`, `infrastructure_type`, `timestamp` |
-| `users` | `id VARCHAR(64)` PK, `phone` UNIQUE, `name`, `city`, `car_clearance`, `created_at` |
+| `users` | `id VARCHAR(64)` PK, `phone` UNIQUE, `name`, `city`, `car_clearance`, `total_distance_meters DOUBLE PRECISION DEFAULT 0`, `created_at` |
 | `otp_codes` | `phone` PK, `code_hash` (sha256), `attempts`, `expires_at`, `created_at` |
 | `refresh_tokens` | `token_hash` PK, `user_id → users(id) ON DELETE CASCADE`, `expires_at`, `revoked`, `created_at` |
 
@@ -138,6 +138,8 @@ backend/
 | `TelemetryPayload` | struct | Вход POST: `user_id`, `latitude`, `longitude`, `speed_kmh`, `bump_force`, `defect_type`, `infrastructure_type`, `trajectory` |
 | `TelemetryResponse` | struct | Ответ POST: `status`, `id`, `snapped_lat`/`snapped_lon`, нормализованный `bump_force`, типы дефекта и инфраструктуры, `geometry_type` |
 | `TelemetryCluster` | struct | Элемент ответа GET: `cluster_id`, `lat`, `lon`, `max_force`, `unique_users`, `total_hits`, `is_confirmed`, `defect_type`, `infrastructure_type` |
+| `DistancePayload` | struct | Вход `POST /telemetry/distance`: `distance_meters` |
+| `DistanceResponse` | struct | Ответ: `status`, `added_meters`, `total_distance_meters` (накопленный итог пользователя) |
 
 ### internal/models/auth.go
 
@@ -149,8 +151,6 @@ backend/
 | `UserProfile` | struct | `id`, `phone`, `name`, `city`, `car_clearance`, `created_at` |
 | `AuthResponse` | struct | `access_token`, `refresh_token`, `user`, `is_new_user` |
 | `UpdateProfilePayload` | struct | Указатели `name`, `city`, `car_clearance` (частичное обновление) |
-
-> В файле остался нерабочий относительный импорт и не подключён пакет `time` — пакет моделей в текущем виде не собирается (см. ограничения в [README](./README.md)).
 
 ### internal/osrm/client.go
 
@@ -174,6 +174,7 @@ backend/
 | `ResolveLocationWKT(ctx, payload)` | method → `(wkt, geomType)` | Трек длиннее 2 точек → `/match`; `rough_road` остаётся `LINESTRING`, `pothole` усекается до первой точки; иначе `/nearest` → `POINT` |
 | `SaveTelemetry(ctx, payload)` | method → `*TelemetryResponse` | Дефолты `pothole`/`road`, нормализация, `INSERT ... ST_GeomFromText($2, 4326) RETURNING id, ST_Y/ST_X(ST_Centroid(location))` |
 | `GetClusters(ctx)` | method → `[]TelemetryCluster` | Два запроса: DBSCAN-кластеры ям и построчный список `rough_road` (+ смещение `1000000` к `cluster_id`) |
+| `RecordDistance(ctx, userID, meters)` | method → `*DistanceResponse` | Атомарный `UPDATE users SET total_distance_meters = COALESCE(total_distance_meters, 0) + $1 … RETURNING`; для пустого `userID` и `anonymous` запись в БД пропускается, итог возвращается нулевым |
 
 **Правило подтверждения кластера:** `unique_users >= 2` **или** `total_hits >= 3` (считается на стороне Go, не в SQL).
 
@@ -201,6 +202,7 @@ backend/
 | `telemetry.go` | `TelemetryHandler` / `NewTelemetryHandler` | struct / func | Обёртка над `service.TelemetryService` |
 | `telemetry.go` | `PostTelemetry` | method | Разбор JSON (400), порог `MinSpeedKMH` (400 `Speed too low`), подстановка `user_id` из контекста или `anonymous`, `200` с `TelemetryResponse` |
 | `telemetry.go` | `GetTelemetry` | method | Массив кластеров, `500` с `detail` при ошибке |
+| `telemetry.go` | `PostDistance` | method | Разбор JSON (400), проверка `distance_meters > 0` (400), пользователь из контекста или `anonymous`, `200` с `DistanceResponse` |
 | `auth.go` | `AuthHandler` / `NewAuthHandler` | struct / func | Обёртка над `service.AuthService` |
 | `auth.go` | `RequestCode`, `VerifyCode`, `Refresh`, `GetMe`, `UpdateMe` | methods | Валидация payload, коды 400/401/404/500, ответы JSON |
 | `middleware.go` | `ContextUserIDKey` | const `contextKey` | Ключ `user_id` в `context.Context` |
@@ -291,13 +293,15 @@ lib/
 
 | Сущность | Тип | Назначение |
 |----------|-----|------------|
-| `DetectScreen` | StatefulWidget | Экран «Запись»: реальные GPS и акселерометр, старт и остановка foreground-службы |
+| `DetectScreen` | StatefulWidget | Экран «Запись»: реальные GPS и акселерометр, одометр поездки, старт и остановка foreground-службы; дерево обёрнуто в `WithForegroundTask` |
+| `_tripDistanceMeters` / `_pendingSyncMeters` / `_lastPos` | fields | Пробег за поездку, неотправленный остаток буфера и последняя позиция |
 | `_checkPermissionsAndStart` | method | Автостарт при выданном доступе, иначе пуш `OnboardingPanel` |
-| `_initForegroundTask` | method | `FlutterForegroundTask.init`: канал уведомлений с прежним ID проекта, `eventAction.repeat(5000)`, wake/wifi lock |
-| `_toggleTracking` | method | `startService(callback: startCallback)` / `stopService` |
+| `_initForegroundTask` | method | `FlutterForegroundTask.init`: канал `road_pulse_tracking` («Road Pulse Tracking»), `eventAction.repeat(5000)`, wake/wifi lock |
+| `_toggleTracking` | method | `startService(callback: startCallback)` / `stopService`; при остановке досылает остаток буфера, при старте обнуляет счётчики поездки |
 | `_onReceiveTaskData` | method | Логи из isolate → `ApiService.addLog` |
-| `_initSensors` | method | Стримы позиции (distanceFilter 2) и `userAccelerometer`; при скорости ≥ 20 км/ч и активной записи копит километраж в `AchievementService` |
-| `_buildSpeedometer` / `_buildGateBanner` | methods | Крупная скорость и подсказка про порог 20 км/ч |
+| `_initSensors` | method | Стримы позиции (`distanceFilter: 1`) и `userAccelerometer`. Шаг учитывается при точности ≤ 80 м и длине 0.6–300 м **на любой скорости**: метры идут в `AchievementService.addDistanceMeters`, в счётчик поездки и в буфер, который уходит на сервер каждые 15 м |
+| `_buildOdometerCard` | method | Карточка «ПРОБЕГ ЗА ПОЕЗДКУ» под спидометром: километры и метры в реальном времени |
+| `_buildSpeedometer` / `_buildGateBanner` | methods | Крупная скорость и баннер: пробег пишется на любой скорости, удары — от 20 км/ч |
 | `_buildScope` / `PolotnoScopePainter` | widget / CustomPainter | Осциллограф оси Z с пунктирным порогом 7 g (`_drawDashedLine`) |
 | `_buildTerminal` | method | Журнал событий из `ApiService.logs` (последние 6 строк, классификация по префиксам) |
 
@@ -305,7 +309,12 @@ lib/
 
 | Сущность | Тип | Назначение |
 |----------|-----|------------|
-| `ProfileScreen` | StatelessWidget | Секции: заголовок с инициалами из `ApiService.getUserProfile()`, бейдж сообщества, 4 стата (заглушки), Полоса последней поездки (макет), достижения, теплокарта |
+| `ProfileScreen` | StatefulWidget | Секции: заголовок с инициалами из `ApiService.getUserProfile()`, ранговый бейдж сообщества, сетка статов, Полоса последней поездки (макет), достижения, теплокарта |
+| `initState` / `RefreshIndicator` | hook / widget | Перечитывают локальные счётчики при открытии вкладки и по жесту pull-to-refresh |
+| `_buildCommunityBadge` | method | `FutureBuilder<UserStats>`: текст бейджа выбирается по текущему рейтингу |
+| `_getCommunityBadgeText(rating)` | static method | Пороги ранга: `≥ 2500` → Топ 1%, `≥ 1500` → 5%, `≥ 800` → 10%, `≥ 400` → 25%, `≥ 200` → 50%, `≥ 50` → 80%, иначе «Новый участник» |
+| `_buildStatsGrid` | method | `FutureBuilder<UserStats>`: дефекты («зачтено сервером»), километры и метры трекинга, очки рейтинга с числом наград и дней серии, «подвесок спасено» |
+| `_formatNumber` / `_formatKm` | static methods | Разряды через пробел и формат километров (два знака до 100 км) |
 | `_buildAchievements` / `_showAchievementsSheet` | methods | Топ-8 достижений и шит «Все 30» (`_AllAchievementsSheet`) |
 | `_buildActivityHeatmap` | method | Сетка 28 дней из `ApiService.getActivityData()` (серия, входы, активные дни) |
 | `_formatStreak` / `_formatVisits` | static methods | Русские формы числительных |
@@ -327,7 +336,9 @@ lib/
 | `Achievement` | class | `id`, `category`, `title`, `description`, `icon`, `current`, `target`, `isUnlocked`, `progressRatio` |
 | `AchievementService.categories` | const list | «Все», «Старт», «Водитель», «Житель», «Порядочный гражданин», «Моя яма», «Доверие и сообщество» |
 | `getAchievements()` | static Future | Каталог 30 достижений и прогресс из `SharedPreferences` (серия дней подтягивается из активности) |
+| `getTotalDistanceMeters()` / `getTotalDistanceKm()` | static Future | Накопленный пробег из `SharedPreferences` |
 | `addDistanceMeters(meters)` | static Future | Накопление километража, зачёт `first_km` и `thousand` |
+| `syncDefectsProgress(count)` | static Future | Синхронизация `first_find`, `sharp_eye`, `road_scanner` по числу зачтённых дефектов |
 | `checkCarProfile({model, tires, clearance})` | static Future | Зачёт `car_profile` |
 | `increment(id, [delta])` | static Future | Инкремент произвольной записи прогресса |
 | `_catalog`, `_loadRawProgress`, `_saveRawProgress` | private | Каталог и хранилище (стартовые значения для `first_km`, `first_find`, `sharp_eye`, `thousand`) |
@@ -347,7 +358,11 @@ lib/
 | `requestCode(phone)` / `verifyCode(phone, code)` | static Future | Авторизация; сохранение access/refresh токенов и профиля |
 | `updateProfile({name, city, clearance})` | static Future | Локальное сохранение и `PATCH /auth/me` при наличии токена |
 | `getAccessToken()` / `isAuthenticated()` / `getUserProfile()` / `logout()` | static Future | Работа с сессией (токены и профиль в `SharedPreferences`) |
-| `sendDefect({...})` | static Future\<bool\> | `POST /api/v1/telemetry` с `Bearer`, если токен есть; принимает `defectType`, `infrastructureType`, `trajectory` |
+| `UserStats` | class | DTO профиля: `totalKm`, `totalDefects`, `rating`, `savedSuspensions`, `unlockedAchievements`, `streakDays` (+ `empty()`) |
+| `getDefectsCount()` / `incrementDefectsCount([delta])` | static Future | Локальный счётчик зачтённых дефектов (`user_defects_count`) и синхронизация достижений |
+| `getUserStats()` | static Future | Собирает статистику и считает рейтинг: `км × 10 + дефекты × 50 + награды × 100 + серия × 20`; «подвесок спасено» = `ceil(дефекты × 0.15)` |
+| `sendDistance(meters)` | static Future\<bool\> | `POST /api/v1/telemetry/distance` с `Bearer`, если токен есть; успех — ответ `200` (итог из ответа не используется) |
+| `sendDefect({...})` | static Future\<bool\> | `POST /api/v1/telemetry` с `Bearer`, если токен есть; принимает `defectType`, `infrastructureType`, `trajectory`; счётчик дефектов растёт **только** при ответе `200` |
 | `getBumps()` | static Future\<List\<Map\>\> | `GET /api/v1/telemetry` |
 
 `user_id` в теле POST не отправляется — сервис берёт его из JWT или помечает запись как `anonymous`.
@@ -358,15 +373,17 @@ lib/
 |----------|-----|------------|
 | `startCallback()` | entry-point (`@pragma('vm:entry-point')`) | Регистрация `SensorTaskHandler` в isolate foreground-задачи |
 | `TrajectoryPoint` | class | Точка трека (`lat`, `lon`, `timestamp`) и `toJson()` |
-| `SensorTaskHandler` | `TaskHandler` | Фоновый isolate: подписки на позицию (distanceFilter 5) и `userAccelerometer` |
+| `SensorTaskHandler` | `TaskHandler` | Фоновый isolate: подписки на позицию (`distanceFilter: 1`) и `userAccelerometer` |
+| `_pendingDistanceMeters` / `_lastDistancePosition` / `_lastDistanceSync` | fields | Буфер пробега, последняя позиция и время последней синхронизации |
 | `SensorTaskHandler.bumpThreshold` | static const `7.0` g | Порог удара (используется и графиком экрана «Запись») |
 | `_isSpeedBump(zForce)` | method | Игнор лежачих полицейских: пик по Z > 5.0 g длительностью < 300 мс → пауза 500 мс |
 | `_detectRoughRoad(yForce)` | method | Более 4 пиков по Y > 4.0 g за 5 с → `rough_road`, сила `пики × 2`, диапазон 20–40 км/ч, блокировка на 5 с |
 | `_detectPothole(event)` | method | `force = sqrt(x² + y² + z²) > 7.0` → `pothole`, скорость ≥ 20 км/ч, пауза 2 с |
 | `_sendDefectData({...})` | method | `Geolocator.getCurrentPosition`, перевод в км/ч, фильтр по скорости, `ApiService.sendDefect` с буфером трека, отчёт в UI через `sendDataToMain` |
-| `_updateTrajectory(position)` | method | Скользящий буфер последних 10 точек |
+| `_updateTrajectoryAndDistance(position)` | method | Ведёт буфер трека (10 точек) и считает шаг: точность ≤ 80 м, длина 0.6–300 м — на любой скорости; метры идут в `AchievementService` и в буфер отправки |
+| `_checkAndSyncDistance({force})` | method | Отправляет буфер при ≥ 25 м, либо ≥ 5 м за 20 с, либо принудительно; при ошибке возвращает метры обратно в буфер |
 | `_pauseMonitoring(ms)` | method | Временная блокировка детекции |
-| `onStart` / `onRepeatEvent` / `onDestroy` | overrides | Жизненный цикл задачи: старт стримов, отмена подписок |
+| `onStart` / `onRepeatEvent` / `onDestroy` | overrides | Жизненный цикл: старт стримов, периодическая проверка буфера (раз в 5 с), принудительный сброс остатка и отмена подписок |
 
 ### screens/auth_screen.dart
 
@@ -386,6 +403,7 @@ lib/
 | Сущность | Тип | Назначение |
 |----------|-----|------------|
 | `AccountScreen` | StatefulWidget | Секции «ВХОД», «ЗАПИСЬ», «ОПАСНАЯ ЗОНА» и строка версии |
+| `_loadAppVersion` | method | `PackageInfo.fromPlatform()` → «Дорожный пульс {версия} · сборка {номер}»; при ошибке — резервная строка из кода |
 | `_loadProfile` | method | `ApiService.getUserProfile()` и марка/шины из `SharedPreferences` |
 | `_showEditProfileDialog` | method | Диалог: имя, город, марка и модель, шины, клиренс; сохранение локально, зачёт `car_profile`, `PATCH /auth/me` |
 | `_handleLogout` | method | `ApiService.logout()` → `AuthScreen` (используется и для «Удалить аккаунт») |
@@ -408,6 +426,16 @@ lib/
 3. `Geolocator.getCurrentPosition` и перевод скорости в км/ч; фильтр ≥ 20 км/ч (для `rough_road` ещё и ≤ 40).
 4. `ApiService.sendDefect(...)` → `POST /api/v1/telemetry` с `Bearer`, если есть сессия.
 5. Сервис: `ResolveLocationWKT` (OSRM) → `CalculateNormalizedForce` → `INSERT` в PostGIS.
+6. `ApiService.sendDefect` увеличивает локальный счётчик дефектов только при ответе `200`, поэтому статистика профиля считается по фактически принятым сервером записям.
+
+### Одометр и статистика
+
+1. Фоновый isolate (`sensor_service`) и экран «Запись» (`detect_screen`) считают шаг независимо: точность ≤ 80 м, длина шага 0.6–300 м, ограничения по скорости нет.
+2. Каждый шаг идёт в локальный счётчик `AchievementService.addDistanceMeters` и в буфер отправки.
+3. Буфер уходит пачками: isolate — при ≥ 25 м либо ≥ 5 м за 20 с, экран — каждые 15 м, плюс принудительно при остановке мониторинга. Транспорт — `ApiService.sendDistance` → `POST /api/v1/telemetry/distance`.
+4. Сервис атомарно прибавляет метры к `users.total_distance_meters`; для `anonymous` он только отвечает `200`, ничего не записывая.
+5. Зачтённые дефекты считает клиент: `ApiService.sendDefect` увеличивает локальный счётчик **только** при ответе `200`.
+6. `ProfileScreen` собирает `UserStats` из локальных счётчиков и активности и считает рейтинг на клиенте; серверный итог пробега в интерфейсе не используется.
 
 ### Чтение карты и ленты
 
@@ -427,7 +455,7 @@ lib/
 
 | Слой | Должен делать | Не должен |
 |------|----------------|-----------|
-| `sensor_service` | Датчики, пороги, вызов API | UI, тема |
+| `sensor_service` | Датчики, пороги, трек, одометр, вызов API | UI, тема |
 | `api_service` | HTTP, токены, буфер логов | Виджеты, бизнес-пороги датчиков |
 | Экраны (`*_screen`) | UI и навигация | Дублировать HTTP-логику (только через `ApiService`) |
 | `handler` | HTTP: разбор запроса, коды ответов | SQL и бизнес-правила |

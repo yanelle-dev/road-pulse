@@ -63,3 +63,35 @@ func (h *TelemetryHandler) GetTelemetry(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(clusters)
 }
+
+func (h *TelemetryHandler) PostDistance(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var payload models.DistancePayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Некорректный JSON"})
+		return
+	}
+
+	if payload.DistanceMeters <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Дистанция должна быть больше 0"})
+		return
+	}
+
+	userID := "anonymous"
+	if authUserID, ok := r.Context().Value(ContextUserIDKey).(string); ok && authUserID != "" {
+		userID = authUserID
+	}
+
+	resp, err := h.service.RecordDistance(r.Context(), userID, payload.DistanceMeters)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}

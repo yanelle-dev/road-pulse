@@ -60,9 +60,11 @@ func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			name VARCHAR(100) NOT NULL DEFAULT '',
 			city VARCHAR(100) NOT NULL DEFAULT '',
 			car_clearance INT NOT NULL DEFAULT 160,
+			total_distance_meters DOUBLE PRECISION NOT NULL DEFAULT 0,
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);`,
 		"CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);",
+		"ALTER TABLE users ADD COLUMN IF NOT EXISTS total_distance_meters DOUBLE PRECISION DEFAULT 0;",
 
 		`CREATE TABLE IF NOT EXISTS otp_codes (
 			phone VARCHAR(32) PRIMARY KEY,

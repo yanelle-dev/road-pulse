@@ -85,6 +85,7 @@ func main() {
 		r.Group(func(r chi.Router) {
 			r.Use(handler.OptionalAuth(authService))
 			r.Post("/telemetry", telemetryHandler.PostTelemetry)
+			r.Post("/telemetry/distance", telemetryHandler.PostDistance)
 		})
 		r.Get("/telemetry", telemetryHandler.GetTelemetry)
 	})

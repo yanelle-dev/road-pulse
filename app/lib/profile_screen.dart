@@ -6,8 +6,22 @@ import 'app_theme.dart';
 import 'screens/account_screen.dart';
 import 'widgets/road_ribbon.dart';
 
-class ProfileScreen extends StatelessWidget {
+class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
+
+  @override
+  State<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // При открытии профиля перезагружаем SharedPreferences
+    AchievementService.getTotalDistanceMeters().then((_) {
+      if (mounted) setState(() {});
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -17,17 +31,26 @@ class ProfileScreen extends StatelessWidget {
       backgroundColor: colors.voidBg,
       body: SafeArea(
         bottom: false,
-        child: ListView(
-          physics: const BouncingScrollPhysics(),
-          padding: const EdgeInsets.only(bottom: 120),
-          children: [
-            _buildHeader(context, colors),
-            _buildCommunityBadge(colors),
-            _buildStatsGrid(colors),
-            _buildLastTrip(colors),
-            _buildAchievements(colors),
-            _buildActivityHeatmap(colors),
-          ],
+        child: RefreshIndicator(
+          color: colors.mark,
+          onRefresh: () async {
+            await AchievementService.getTotalDistanceMeters();
+            if (mounted) setState(() {});
+          },
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(
+              parent: BouncingScrollPhysics(),
+            ),
+            padding: const EdgeInsets.only(bottom: 120),
+            children: [
+              _buildHeader(context, colors),
+              _buildCommunityBadge(colors),
+              _buildStatsGrid(colors),
+              _buildLastTrip(colors),
+              _buildAchievements(colors),
+              _buildActivityHeatmap(colors),
+            ],
+          ),
         ),
       ),
     );
@@ -118,11 +141,12 @@ class ProfileScreen extends StatelessWidget {
                   color: colors.ink,
                   size: 20,
                 ),
-                onPressed: () {
-                  Navigator.push(
+                onPressed: () async {
+                  await Navigator.push(
                     context,
                     MaterialPageRoute(builder: (_) => const AccountScreen()),
                   );
+                  if (mounted) setState(() {});
                 },
               ),
             ],
@@ -137,81 +161,125 @@ class ProfileScreen extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
       child: Align(
         alignment: Alignment.centerLeft,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-          decoration: BoxDecoration(
-            color: colors.markSoft,
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: colors.markLine),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.star_rounded, size: 14, color: colors.markInk),
-              const SizedBox(width: 6),
-              Text(
-                "Топ 5% сообщества",
-                style: TextStyle(
-                  fontFamily: AppTheme.fontUi,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  color: colors.markInk,
-                ),
+        child: FutureBuilder<UserStats>(
+          future: ApiService.getUserStats(),
+          builder: (context, snapshot) {
+            final rating = snapshot.data?.rating ?? 0;
+            final badgeText = _getCommunityBadgeText(rating);
+
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+              decoration: BoxDecoration(
+                color: colors.markSoft,
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: colors.markLine),
               ),
-            ],
-          ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.star_rounded, size: 14, color: colors.markInk),
+                  const SizedBox(width: 6),
+                  Text(
+                    badgeText,
+                    style: TextStyle(
+                      fontFamily: AppTheme.fontUi,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: colors.markInk,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
         ),
       ),
     );
   }
 
+  /// Динамический расчёт ранга и процентиля пользователя на основе рейтинга
+  static String _getCommunityBadgeText(int rating) {
+    if (rating >= 2500) return "Топ 1% сообщества";
+    if (rating >= 1500) return "Топ 5% сообщества";
+    if (rating >= 800) return "Топ 10% сообщества";
+    if (rating >= 400) return "Топ 25% сообщества";
+    if (rating >= 200) return "Топ 50% сообщества";
+    if (rating >= 50) return "Топ 80% сообщества";
+    return "Новый участник";
+  }
+
   Widget _buildStatsGrid(PolotnoColors colors) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-      child: Column(
-        children: [
-          Row(
+      child: FutureBuilder<UserStats>(
+        future: ApiService.getUserStats(),
+        builder: (context, snapshot) {
+          final stats = snapshot.data ?? UserStats.empty();
+
+          final defectsVal = _formatNumber(stats.totalDefects);
+          final kmVal = _formatKm(stats.totalKm);
+          final ratingVal = _formatNumber(stats.rating);
+          final savedVal = _formatNumber(stats.savedSuspensions);
+
+          return Column(
             children: [
-              _buildStatCard(
-                colors,
-                "147",
-                "Дефектов найдено",
-                "+12 за неделю",
-                colors.s1,
+              Row(
+                children: [
+                  _buildStatCard(
+                    colors,
+                    defectsVal,
+                    "Дефектов найдено",
+                    "зачтено сервером",
+                    colors.s1,
+                  ),
+                  const SizedBox(width: 8),
+                  _buildStatCard(
+                    colors,
+                    kmVal,
+                    "Километров записано",
+                    "${(stats.totalKm * 1000).round()} м трекинга",
+                    colors.s1,
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              _buildStatCard(
-                colors,
-                "1 234",
-                "Километров записано",
-                "+86 км",
-                colors.s1,
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  _buildStatCard(
+                    colors,
+                    ratingVal,
+                    "Очков рейтинга",
+                    "${stats.unlockedAchievements} наград · ${stats.streakDays} дн",
+                    colors.s1,
+                  ),
+                  const SizedBox(width: 8),
+                  _buildStatCard(
+                    colors,
+                    savedVal,
+                    "Подвесок спасено",
+                    "по объездам",
+                    colors.s1,
+                  ),
+                ],
               ),
             ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              _buildStatCard(
-                colors,
-                "2 840",
-                "Очков рейтинга",
-                "+340",
-                colors.s1,
-              ),
-              const SizedBox(width: 8),
-              _buildStatCard(
-                colors,
-                "12",
-                "Подвесок спасено",
-                "по объездам",
-                colors.s1,
-              ),
-            ],
-          ),
-        ],
+          );
+        },
       ),
     );
+  }
+
+  static String _formatNumber(int number) {
+    final str = number.toString();
+    final regExp = RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))');
+    return str.replaceAllMapped(regExp, (Match m) => '${m[1]} ');
+  }
+
+  static String _formatKm(double km) {
+    if (km >= 100.0) {
+      return _formatNumber(km.round());
+    }
+    return km.toStringAsFixed(2).replaceAll('.', ',');
   }
 
   Widget _buildStatCard(
@@ -236,10 +304,10 @@ class ProfileScreen extends StatelessWidget {
               val,
               style: TextStyle(
                 fontFamily: AppTheme.fontDisplay,
-                fontSize: 29,
+                fontSize: 27,
                 fontWeight: FontWeight.w700,
                 color: colors.ink,
-                letterSpacing: -1.2,
+                letterSpacing: -1.0,
                 height: 1.0,
               ),
             ),
@@ -258,7 +326,7 @@ class ProfileScreen extends StatelessWidget {
               diff,
               style: TextStyle(
                 fontFamily: AppTheme.fontMono,
-                fontSize: 10.5,
+                fontSize: 10.0,
                 fontWeight: FontWeight.w500,
                 color: diffColor,
               ),
@@ -288,7 +356,7 @@ class ProfileScreen extends StatelessWidget {
                 ),
               ),
               Text(
-                "ВЧЕРА · 18:40",
+                "СЕГОДНЯ",
                 style: TextStyle(
                   fontFamily: AppTheme.fontMono,
                   fontSize: 9.5,
@@ -315,25 +383,25 @@ class ProfileScreen extends StatelessWidget {
                   textBaseline: TextBaseline.alphabetic,
                   children: [
                     Text(
-                      "28,4",
+                      "ТРЕК",
                       style: TextStyle(
                         fontFamily: AppTheme.fontDisplay,
-                        fontSize: 34,
+                        fontSize: 28,
                         fontWeight: FontWeight.w700,
                         color: colors.ink,
-                        letterSpacing: -1.2,
+                        letterSpacing: -0.8,
                         height: 0.9,
                       ),
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      "КМ · 41 МИН",
+                      "АКТИВНЫЙ МОНИТОРИНГ",
                       style: TextStyle(
                         fontFamily: AppTheme.fontMono,
                         fontSize: 10,
                         fontWeight: FontWeight.w500,
                         letterSpacing: 1.2,
-                        color: colors.ink3,
+                        color: colors.s1,
                       ),
                     ),
                   ],
@@ -342,12 +410,9 @@ class ProfileScreen extends StatelessWidget {
                 RoadRibbon(
                   height: 12,
                   segments: [
-                    RibbonSegment(flex: 0.31, color: colors.s1),
-                    RibbonSegment(flex: 0.08, color: colors.s3),
-                    RibbonSegment(flex: 0.17, color: colors.s2),
-                    RibbonSegment(flex: 0.22, color: colors.s1),
-                    RibbonSegment(flex: 0.06, color: colors.s3),
-                    RibbonSegment(flex: 0.16, color: colors.s2),
+                    RibbonSegment(flex: 0.70, color: colors.s1),
+                    RibbonSegment(flex: 0.15, color: colors.s2),
+                    RibbonSegment(flex: 0.15, color: colors.s3),
                   ],
                 ),
                 const SizedBox(height: 7),
@@ -355,7 +420,7 @@ class ProfileScreen extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      "ДМИТРОВСКОЕ Ш.",
+                      "СТАРТ",
                       style: TextStyle(
                         fontFamily: AppTheme.fontMono,
                         fontSize: 9.5,
@@ -364,7 +429,7 @@ class ProfileScreen extends StatelessWidget {
                       ),
                     ),
                     Text(
-                      "САДОВОЕ",
+                      "ФИНИШ",
                       style: TextStyle(
                         fontFamily: AppTheme.fontMono,
                         fontSize: 9.5,

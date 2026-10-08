@@ -6,6 +6,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+
+import 'achievement_service.dart';
 import 'api_service.dart';
 
 @pragma('vm:entry-point')
@@ -30,7 +32,6 @@ class TrajectoryPoint {
 }
 
 class SensorTaskHandler extends TaskHandler {
-  /// Порог удара (g) — показывается пунктиром на графике экрана «Запись».
   static const double bumpThreshold = 7.0;
 
   StreamSubscription? _accelSubscription;
@@ -47,6 +48,10 @@ class SensorTaskHandler extends TaskHandler {
 
   final List<TrajectoryPoint> _trajectoryBuffer = [];
 
+  Position? _lastDistancePosition;
+  double _pendingDistanceMeters = 0.0;
+  DateTime _lastDistanceSync = DateTime.now();
+
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     FlutterForegroundTask.sendDataToMain("🟢 ФОН: Мониторинг запущен...");
@@ -54,21 +59,21 @@ class SensorTaskHandler extends TaskHandler {
     _positionSubscription = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 5,
+        distanceFilter: 1,
       ),
-    ).listen(_updateTrajectory);
+    ).listen(_updateTrajectoryAndDistance);
 
     _accelSubscription = userAccelerometerEventStream().listen((event) async {
       if (!_isMonitoring) return;
 
       if (_isSpeedBump(event.z)) return;
-      
+
       await _detectRoughRoad(event.y);
       await _detectPothole(event);
     });
   }
 
-  void _updateTrajectory(Position position) {
+  void _updateTrajectoryAndDistance(Position position) {
     final point = TrajectoryPoint(
       position.latitude,
       position.longitude,
@@ -78,16 +83,60 @@ class SensorTaskHandler extends TaskHandler {
     if (_trajectoryBuffer.length > 10) {
       _trajectoryBuffer.removeAt(0);
     }
+
+    // Порог точности 80 м для пешеходов и машин
+    if (position.accuracy > 80.0) return;
+
+    if (_lastDistancePosition != null) {
+      final distanceM = Geolocator.distanceBetween(
+        _lastDistancePosition!.latitude,
+        _lastDistancePosition!.longitude,
+        position.latitude,
+        position.longitude,
+      );
+
+      // Шаг пешехода фиксируется от 0.6 метра
+      if (distanceM >= 0.6 && distanceM < 300.0) {
+        _pendingDistanceMeters += distanceM;
+        AchievementService.addDistanceMeters(distanceM);
+        _checkAndSyncDistance();
+      }
+    }
+    _lastDistancePosition = position;
+  }
+
+  Future<void> _checkAndSyncDistance({bool force = false}) async {
+    final now = DateTime.now();
+    final elapsedSec = now.difference(_lastDistanceSync).inSeconds;
+
+    if (force ||
+        _pendingDistanceMeters >= 25.0 ||
+        (elapsedSec >= 20 && _pendingDistanceMeters >= 5.0)) {
+      if (_pendingDistanceMeters <= 0) return;
+
+      final metersToSend = _pendingDistanceMeters;
+      _pendingDistanceMeters = 0.0;
+      _lastDistanceSync = now;
+
+      final success = await ApiService.sendDistance(metersToSend);
+      if (success) {
+        FlutterForegroundTask.sendDataToMain(
+          "✅ Пробег сохранён: +${metersToSend.toStringAsFixed(0)} м",
+        );
+      } else {
+        _pendingDistanceMeters += metersToSend;
+      }
+    }
   }
 
   bool _isSpeedBump(double zForce) {
     if (zForce.abs() > _zPeakThreshold) {
       _zPeakStartTime ??= DateTime.now();
-      return true; 
+      return true;
     } else if (_zPeakStartTime != null) {
       final duration = DateTime.now().difference(_zPeakStartTime!);
       _zPeakStartTime = null;
-      
+
       if (duration.inMilliseconds < 300) {
         FlutterForegroundTask.sendDataToMain("⚠️ Лежачий полицейский (игнор)");
         _pauseMonitoring(500);
@@ -123,7 +172,9 @@ class SensorTaskHandler extends TaskHandler {
   Future<void> _detectPothole(UserAccelerometerEvent event) async {
     if (_isRoughRoadActive) return;
 
-    double force = sqrt(event.x * event.x + event.y * event.y + event.z * event.z);
+    double force = sqrt(
+      event.x * event.x + event.y * event.y + event.z * event.z,
+    );
     if (force > bumpThreshold) {
       _pauseMonitoring(2000);
       await _sendDefectData(
@@ -143,21 +194,27 @@ class SensorTaskHandler extends TaskHandler {
   }) async {
     try {
       Position position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high)
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
       );
-      
+
       double speedKmh = position.speed * 3.6;
 
       if (speedKmh < minSpeed) {
-        FlutterForegroundTask.sendDataToMain("⚠️ Удар, скорость мала: ${speedKmh.toStringAsFixed(1)} км/ч");
+        FlutterForegroundTask.sendDataToMain(
+          "⚠️ Удар, скорость мала: ${speedKmh.toStringAsFixed(1)} км/ч",
+        );
         return;
       }
       if (speedKmh > maxSpeed) {
         return;
       }
 
-      FlutterForegroundTask.sendDataToMain("⚡ $defectType (${force.toStringAsFixed(1)}). Отправка...");
-      
+      FlutterForegroundTask.sendDataToMain(
+        "⚡ $defectType (${force.toStringAsFixed(1)}). Отправка...",
+      );
+
       bool success = await ApiService.sendDefect(
         lat: position.latitude,
         lon: position.longitude,
@@ -166,7 +223,7 @@ class SensorTaskHandler extends TaskHandler {
         defectType: defectType,
         trajectory: _trajectoryBuffer.map((p) => p.toJson()).toList(),
       );
-      
+
       if (success) {
         FlutterForegroundTask.sendDataToMain("✅ УСПЕХ! Данные на сервере.");
       } else {
@@ -179,14 +236,20 @@ class SensorTaskHandler extends TaskHandler {
 
   void _pauseMonitoring(int milliseconds) {
     _isMonitoring = false;
-    Future.delayed(Duration(milliseconds: milliseconds), () => _isMonitoring = true);
+    Future.delayed(
+      Duration(milliseconds: milliseconds),
+      () => _isMonitoring = true,
+    );
   }
 
   @override
-  void onRepeatEvent(DateTime timestamp) {}
+  void onRepeatEvent(DateTime timestamp) {
+    _checkAndSyncDistance();
+  }
 
   @override
   Future<void> onDestroy(DateTime timestamp, bool isTaskDestroyed) async {
+    await _checkAndSyncDistance(force: true);
     await _accelSubscription?.cancel();
     await _positionSubscription?.cancel();
     FlutterForegroundTask.sendDataToMain("🛑 ФОН: Мониторинг остановлен");
