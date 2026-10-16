@@ -1,10 +1,10 @@
-# Project-level configuration.
+﻿# Project-level configuration.
 cmake_minimum_required(VERSION 3.14)
-project(easyride_app LANGUAGES CXX)
+project(road_pulse LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
-set(BINARY_NAME "easyride_app")
+set(BINARY_NAME "road_pulse")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.

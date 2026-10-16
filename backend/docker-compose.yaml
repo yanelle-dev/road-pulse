@@ -4,9 +4,9 @@ services:
     container_name: road_pulse_db
     restart: always
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password123
-      POSTGRES_DB: road_pulse_db
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Необходимо задать POSTGRES_PASSWORD в файле .env}
+      POSTGRES_DB: ${POSTGRES_DB:-road_pulse_db}
     volumes:
       - road_pulse_data:/var/lib/postgresql/data
     networks:
@@ -17,10 +17,13 @@ services:
     container_name: road_pulse_api
     restart: always
     environment:
-      - DATABASE_URL=postgresql://admin:password123@db:5432/road_pulse_db
-      - PORT=8000
-      - OSRM_BASE=https://router.project-osrm.org
-      - JWT_SECRET=road_pulse_secret_key_prod_2026
+      - APP_ENV=${APP_ENV:-development}
+      - DATABASE_URL=${DATABASE_URL:?Необходимо задать DATABASE_URL в файле .env}
+      - PORT=${PORT:-8000}
+      - OSRM_BASE=${OSRM_BASE:-https://router.project-osrm.org}
+      - JWT_SECRET=${JWT_SECRET:?Необходимо задать JWT_SECRET в файле .env}
+      - SMS_API_KEY=${SMS_API_KEY:-}
+      - SMS_SENDER=${SMS_SENDER:-RoadPulse}
     ports:
       - '8001:8000'
     depends_on:

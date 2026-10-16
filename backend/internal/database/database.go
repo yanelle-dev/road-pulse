@@ -34,7 +34,7 @@ func Connect(ctx context.Context, dbURL string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// InitSchema применяет расширение PostGIS, создает таблицы telemetry, users, otp_codes, refresh_tokens
+// InitSchema применяет расширение PostGIS, создает таблицы telemetry, users, otp_codes, refresh_tokens, trips, defect_comments
 func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	queries := []string{
 		"CREATE EXTENSION IF NOT EXISTS postgis;",
@@ -61,10 +61,14 @@ func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			city VARCHAR(100) NOT NULL DEFAULT '',
 			car_clearance INT NOT NULL DEFAULT 160,
 			total_distance_meters DOUBLE PRECISION NOT NULL DEFAULT 0,
+			streak_days INT NOT NULL DEFAULT 0,
+			unlocked_achievements INT NOT NULL DEFAULT 0,
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);`,
 		"CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);",
 		"ALTER TABLE users ADD COLUMN IF NOT EXISTS total_distance_meters DOUBLE PRECISION DEFAULT 0;",
+		"ALTER TABLE users ADD COLUMN IF NOT EXISTS streak_days INT NOT NULL DEFAULT 0;",
+		"ALTER TABLE users ADD COLUMN IF NOT EXISTS unlocked_achievements INT NOT NULL DEFAULT 0;",
 
 		`CREATE TABLE IF NOT EXISTS otp_codes (
 			phone VARCHAR(32) PRIMARY KEY,
@@ -81,6 +85,33 @@ func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			revoked BOOLEAN NOT NULL DEFAULT false,
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);`,
+
+		// Таблица поездок
+		`CREATE TABLE IF NOT EXISTS trips (
+			id BIGSERIAL PRIMARY KEY,
+			user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			ended_at TIMESTAMPTZ,
+			distance_meters DOUBLE PRECISION NOT NULL DEFAULT 0,
+			defects_count INT NOT NULL DEFAULT 0,
+			smooth_ratio DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+			medium_ratio DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+			hard_ratio DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_trips_user_id ON trips(user_id);",
+		"CREATE INDEX IF NOT EXISTS idx_trips_started_at ON trips(started_at DESC);",
+
+		// Таблица комментариев к дефектам
+		`CREATE TABLE IF NOT EXISTS defect_comments (
+			id BIGSERIAL PRIMARY KEY,
+			cluster_id BIGINT NOT NULL,
+			user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			author_name VARCHAR(100) NOT NULL DEFAULT 'Водитель',
+			text TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_defect_comments_cluster_id ON defect_comments(cluster_id);",
 	}
 
 	for _, query := range queries {

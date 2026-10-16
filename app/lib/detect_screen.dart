@@ -5,11 +5,12 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
-import 'achievement_service.dart';
 import 'api_service.dart';
+import 'constants.dart';
 import 'app_theme.dart';
 import 'sensor_service.dart';
 import 'widgets/onboarding_panel.dart';
+import 'fresh_prefs.dart';
 
 class DetectScreen extends StatefulWidget {
   const DetectScreen({super.key});
@@ -26,8 +27,6 @@ class _DetectScreenState extends State<DetectScreen> {
 
   double _currentSpeed = 0.0;
   double _tripDistanceMeters = 0.0;
-  double _pendingSyncMeters = 0.0;
-  Position? _lastPos;
 
   final int _maxDataPoints = 60;
   List<double> _accelData = [];
@@ -39,7 +38,8 @@ class _DetectScreenState extends State<DetectScreen> {
 
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await freshPrefs();
       _checkPermissionsAndStart();
     });
 
@@ -56,7 +56,16 @@ class _DetectScreenState extends State<DetectScreen> {
 
   void _onReceiveTaskData(Object data) {
     if (data is String) {
-      ApiService.addLog(data);
+      if (data.startsWith("TRIP:")) {
+        final meters = double.tryParse(data.substring(5));
+        if (meters != null && mounted) {
+          setState(() {
+            _tripDistanceMeters = meters;
+          });
+        }
+      } else {
+        ApiService.addLog(data);
+      }
     }
   }
 
@@ -70,32 +79,6 @@ class _DetectScreenState extends State<DetectScreen> {
       if (!mounted) return;
 
       final gpsSpeedKmh = (position.speed * 3.6).clamp(0.0, 999.0);
-
-      if (_isActive && _lastPos != null && position.accuracy <= 80.0) {
-        final distanceM = Geolocator.distanceBetween(
-          _lastPos!.latitude,
-          _lastPos!.longitude,
-          position.latitude,
-          position.longitude,
-        );
-
-        // Фиксация любого реального шага (от 0.6 м до 300 м)
-        if (distanceM >= 0.6 && distanceM < 300.0) {
-          _tripDistanceMeters += distanceM;
-          _pendingSyncMeters += distanceM;
-
-          AchievementService.addDistanceMeters(distanceM);
-
-          // Логирование в журнал каждые 15 м
-          if (_pendingSyncMeters >= 15.0) {
-            final toSend = _pendingSyncMeters;
-            _pendingSyncMeters = 0.0;
-            ApiService.sendDistance(toSend);
-            ApiService.addLog("🟢 Шаг зафиксирован: +${toSend.toStringAsFixed(0)} м (всего: ${_tripDistanceMeters.toStringAsFixed(0)} м)");
-          }
-        }
-      }
-      _lastPos = position;
 
       setState(() {
         _currentSpeed = gpsSpeedKmh;
@@ -173,11 +156,6 @@ class _DetectScreenState extends State<DetectScreen> {
     try {
       if (_isActive) {
         ApiService.addLog("Остановка службы мониторинга");
-        if (_pendingSyncMeters > 0) {
-          final toSend = _pendingSyncMeters;
-          _pendingSyncMeters = 0.0;
-          await ApiService.sendDistance(toSend);
-        }
         await FlutterForegroundTask.stopService();
         setState(() => _isActive = false);
       } else {
@@ -193,8 +171,6 @@ class _DetectScreenState extends State<DetectScreen> {
         setState(() {
           _isActive = true;
           _tripDistanceMeters = 0.0;
-          _pendingSyncMeters = 0.0;
-          _lastPos = null;
         });
       }
     } catch (e) {
@@ -368,7 +344,7 @@ class _DetectScreenState extends State<DetectScreen> {
   }
 
   Widget _buildGateBanner(PolotnoColors colors) {
-    final bool isAboveThreshold = _currentSpeed >= 20.0;
+    final bool isAboveThreshold = _currentSpeed >= kMinDefectSpeedKmh;
 
     return Container(
       margin: const EdgeInsets.fromLTRB(20, 10, 20, 0),

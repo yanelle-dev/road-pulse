@@ -6,9 +6,11 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'achievement_service.dart';
 import 'api_service.dart';
+import 'constants.dart';
 
 @pragma('vm:entry-point')
 void startCallback() {
@@ -50,11 +52,27 @@ class SensorTaskHandler extends TaskHandler {
 
   Position? _lastDistancePosition;
   double _pendingDistanceMeters = 0.0;
+  double _tripDistanceMeters = 0.0;
   DateTime _lastDistanceSync = DateTime.now();
+
+  int? _currentTripId;
+  int _tripDefectsCount = 0;
+  int _tripS2Count = 0;
+  int _tripS3Count = 0;
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     FlutterForegroundTask.sendDataToMain("🟢 ФОН: Мониторинг запущен...");
+
+    final prefs = await SharedPreferences.getInstance();
+    _pendingDistanceMeters = prefs.getDouble(kKeyPendingDistanceMeters) ?? 0.0;
+    _tripDistanceMeters = 0.0;
+    FlutterForegroundTask.sendDataToMain("TRIP:0.0");
+
+    _currentTripId = await ApiService.startTrip();
+    _tripDefectsCount = 0;
+    _tripS2Count = 0;
+    _tripS3Count = 0;
 
     _positionSubscription = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
@@ -71,9 +89,13 @@ class SensorTaskHandler extends TaskHandler {
       await _detectRoughRoad(event.y);
       await _detectPothole(event);
     });
+
+    if (_pendingDistanceMeters > 0) {
+      _checkAndSyncDistance();
+    }
   }
 
-  void _updateTrajectoryAndDistance(Position position) {
+  void _updateTrajectoryAndDistance(Position position) async {
     final point = TrajectoryPoint(
       position.latitude,
       position.longitude,
@@ -84,8 +106,7 @@ class SensorTaskHandler extends TaskHandler {
       _trajectoryBuffer.removeAt(0);
     }
 
-    // Порог точности 80 м для пешеходов и машин
-    if (position.accuracy > 80.0) return;
+    if (position.accuracy > kOdometerMaxAccuracyM) return;
 
     if (_lastDistancePosition != null) {
       final distanceM = Geolocator.distanceBetween(
@@ -95,10 +116,16 @@ class SensorTaskHandler extends TaskHandler {
         position.longitude,
       );
 
-      // Шаг пешехода фиксируется от 0.6 метра
-      if (distanceM >= 0.6 && distanceM < 300.0) {
+      if (distanceM >= kOdometerMinStepM && distanceM < kOdometerMaxStepM) {
+        _tripDistanceMeters += distanceM;
         _pendingDistanceMeters += distanceM;
+
+        FlutterForegroundTask.sendDataToMain("TRIP:$_tripDistanceMeters");
         AchievementService.addDistanceMeters(distanceM);
+
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setDouble(kKeyPendingDistanceMeters, _pendingDistanceMeters);
+
         _checkAndSyncDistance();
       }
     }
@@ -110,21 +137,24 @@ class SensorTaskHandler extends TaskHandler {
     final elapsedSec = now.difference(_lastDistanceSync).inSeconds;
 
     if (force ||
-        _pendingDistanceMeters >= 25.0 ||
+        _pendingDistanceMeters >= kDistanceBatchBackgroundM ||
         (elapsedSec >= 20 && _pendingDistanceMeters >= 5.0)) {
       if (_pendingDistanceMeters <= 0) return;
 
       final metersToSend = _pendingDistanceMeters;
-      _pendingDistanceMeters = 0.0;
       _lastDistanceSync = now;
 
       final success = await ApiService.sendDistance(metersToSend);
+      final prefs = await SharedPreferences.getInstance();
+
       if (success) {
+        _pendingDistanceMeters = (_pendingDistanceMeters - metersToSend).clamp(0.0, double.infinity);
+        await prefs.setDouble(kKeyPendingDistanceMeters, _pendingDistanceMeters);
         FlutterForegroundTask.sendDataToMain(
           "✅ Пробег сохранён: +${metersToSend.toStringAsFixed(0)} м",
         );
       } else {
-        _pendingDistanceMeters += metersToSend;
+        await prefs.setDouble(kKeyPendingDistanceMeters, _pendingDistanceMeters);
       }
     }
   }
@@ -157,7 +187,7 @@ class SensorTaskHandler extends TaskHandler {
       _isRoughRoadActive = true;
       await _sendDefectData(
         defectType: 'rough_road',
-        minSpeed: 20.0,
+        minSpeed: kMinDefectSpeedKmh,
         maxSpeed: 40.0,
         force: _yPeaks.length * 2.0,
       );
@@ -179,7 +209,7 @@ class SensorTaskHandler extends TaskHandler {
       _pauseMonitoring(2000);
       await _sendDefectData(
         defectType: 'pothole',
-        minSpeed: 20.0,
+        minSpeed: kMinDefectSpeedKmh,
         maxSpeed: double.infinity,
         force: force,
       );
@@ -226,6 +256,12 @@ class SensorTaskHandler extends TaskHandler {
 
       if (success) {
         FlutterForegroundTask.sendDataToMain("✅ УСПЕХ! Данные на сервере.");
+        _tripDefectsCount++;
+        if (force > kSeverityHard) {
+          _tripS3Count++;
+        } else if (force > kSeverityMedium) {
+          _tripS2Count++;
+        }
       } else {
         FlutterForegroundTask.sendDataToMain("❌ Ошибка сети/сервера.");
       }
@@ -249,6 +285,22 @@ class SensorTaskHandler extends TaskHandler {
 
   @override
   Future<void> onDestroy(DateTime timestamp, bool isTaskDestroyed) async {
+    if (_currentTripId != null && _currentTripId! > 0) {
+      final total = _tripDefectsCount;
+      double hardRatio = total > 0 ? (_tripS3Count / total).clamp(0.0, 0.4) : 0.05;
+      double medRatio = total > 0 ? (_tripS2Count / total).clamp(0.0, 0.5) : 0.15;
+      double smoothRatio = (1.0 - hardRatio - medRatio).clamp(0.2, 1.0);
+
+      await ApiService.finishTrip(
+        tripId: _currentTripId!,
+        distanceMeters: _tripDistanceMeters,
+        defectsCount: _tripDefectsCount,
+        smoothRatio: smoothRatio,
+        mediumRatio: medRatio,
+        hardRatio: hardRatio,
+      );
+    }
+
     await _checkAndSyncDistance(force: true);
     await _accelSubscription?.cancel();
     await _positionSubscription?.cancel();

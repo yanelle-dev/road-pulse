@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"strings"
 	"time"
 
 	"road_pulse/backend/internal/models"
+	"road_pulse/backend/internal/sms"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
@@ -23,6 +25,7 @@ var (
 	ErrInvalidCode     = errors.New("неверный код подтверждения")
 	ErrCodeExpired     = errors.New("срок действия кода истёк")
 	ErrTooManyAttempts = errors.New("слишком много неверных попыток ввода")
+	ErrRateLimited     = errors.New("повторный запрос кода возможен через 60 секунд")
 	ErrInvalidToken    = errors.New("недействительный токен авторизации")
 	ErrUserNotFound    = errors.New("пользователь не найден")
 )
@@ -30,15 +33,21 @@ var (
 type AuthService struct {
 	pool      *pgxpool.Pool
 	jwtSecret []byte
+	sms       sms.Provider
 }
 
-func NewAuthService(pool *pgxpool.Pool, secret string) *AuthService {
+func NewAuthService(pool *pgxpool.Pool, secret string, smsProvider sms.Provider) *AuthService {
 	if secret == "" {
-		secret = "road_pulse_super_secret_jwt_key_2026"
+		log.Println("JWT_SECRET не задан! Использован временный ключ для разработки.")
+		secret = "dev_only_road_pulse_jwt_secret_key_insecure"
+	}
+	if smsProvider == nil {
+		smsProvider = sms.NewMockProvider()
 	}
 	return &AuthService{
 		pool:      pool,
 		jwtSecret: []byte(secret),
+		sms:       smsProvider,
 	}
 }
 
@@ -67,6 +76,14 @@ func (s *AuthService) RequestCode(ctx context.Context, rawPhone string) (int, er
 		return 0, errors.New("некорректный номер телефона")
 	}
 
+	var lastCreatedAt time.Time
+	checkQuery := `SELECT created_at FROM otp_codes WHERE phone = $1;`
+	if err := s.pool.QueryRow(ctx, checkQuery, phone).Scan(&lastCreatedAt); err == nil {
+		if time.Since(lastCreatedAt) < 60*time.Second {
+			return 0, ErrRateLimited
+		}
+	}
+
 	n, _ := rand.Int(rand.Reader, big.NewInt(9000))
 	code := fmt.Sprintf("%04d", n.Int64()+1000)
 
@@ -86,9 +103,9 @@ func (s *AuthService) RequestCode(ctx context.Context, rawPhone string) (int, er
 		return 0, fmt.Errorf("ошибка сохранения OTP: %w", err)
 	}
 
-	log.Printf("==================================================")
-	log.Printf("📱 [SMS-GATEWAY MOCK] Телефон: %s | Код: %s (или 1234)", phone, code)
-	log.Printf("==================================================")
+	if err := s.sms.SendCode(ctx, phone, code); err != nil {
+		return 0, fmt.Errorf("ошибка отправки SMS: %w", err)
+	}
 
 	return 60, nil
 }
@@ -119,7 +136,7 @@ func (s *AuthService) VerifyCode(ctx context.Context, rawPhone, code string) (*m
 	}
 
 	inputHash := s.hashString(code)
-	if inputHash != codeHash && code != "1234" {
+	if inputHash != codeHash {
 		_, _ = s.pool.Exec(ctx, "UPDATE otp_codes SET attempts = attempts + 1 WHERE phone = $1;", phone)
 		return nil, ErrInvalidCode
 	}
@@ -129,23 +146,29 @@ func (s *AuthService) VerifyCode(ctx context.Context, rawPhone, code string) (*m
 	var user models.UserProfile
 	var isNewUser bool
 
-	// Проверяем, существует ли уже пользователь в базе
-	findQuery := `SELECT id, phone, name, city, car_clearance, created_at FROM users WHERE phone = $1;`
+	findQuery := `
+		SELECT 
+			id, phone, name, city, car_clearance, 
+			COALESCE(total_distance_meters, 0), streak_days, unlocked_achievements, created_at 
+		FROM users 
+		WHERE phone = $1;
+	`
 	err = s.pool.QueryRow(ctx, findQuery, phone).Scan(
-		&user.ID, &user.Phone, &user.Name, &user.City, &user.CarClearance, &user.CreatedAt,
+		&user.ID, &user.Phone, &user.Name, &user.City, &user.CarClearance, 
+		&user.TotalDistanceMeters, &user.StreakDays, &user.UnlockedAchievements, &user.CreatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			// Новый пользователь: создаём запись с пустыми полями
 			isNewUser = true
 			newID := "usr_" + s.hashString(phone+fmt.Sprintf("%d", time.Now().UnixNano()))[:16]
 			insertQuery := `
-				INSERT INTO users (id, phone, name, city, car_clearance, created_at)
-				VALUES ($1, $2, '', '', 0, NOW())
-				RETURNING id, phone, name, city, car_clearance, created_at;
+				INSERT INTO users (id, phone, name, city, car_clearance, total_distance_meters, streak_days, unlocked_achievements, created_at)
+				VALUES ($1, $2, '', '', 0, 0, 0, 0, NOW())
+				RETURNING id, phone, name, city, car_clearance, total_distance_meters, streak_days, unlocked_achievements, created_at;
 			`
 			err = s.pool.QueryRow(ctx, insertQuery, newID, phone).Scan(
-				&user.ID, &user.Phone, &user.Name, &user.City, &user.CarClearance, &user.CreatedAt,
+				&user.ID, &user.Phone, &user.Name, &user.City, &user.CarClearance, 
+				&user.TotalDistanceMeters, &user.StreakDays, &user.UnlockedAchievements, &user.CreatedAt,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("ошибка создания пользователя: %w", err)
@@ -154,7 +177,6 @@ func (s *AuthService) VerifyCode(ctx context.Context, rawPhone, code string) (*m
 			return nil, fmt.Errorf("ошибка поиска пользователя: %w", err)
 		}
 	} else {
-		// Пользователь уже был в базе. Если имя и город заполнены, он НЕ новый
 		trimmedName := strings.TrimSpace(user.Name)
 		trimmedCity := strings.TrimSpace(user.City)
 		if trimmedName == "" || trimmedCity == "" {
@@ -172,6 +194,10 @@ func (s *AuthService) VerifyCode(ctx context.Context, rawPhone, code string) (*m
 	refreshToken, err := s.generateRefreshToken(ctx, user.ID)
 	if err != nil {
 		return nil, err
+	}
+
+	if fullProfile, err := s.GetProfile(ctx, user.ID); err == nil {
+		user = *fullProfile
 	}
 
 	return &models.AuthResponse{
@@ -274,9 +300,16 @@ func (s *AuthService) ValidateAccessToken(tokenStr string) (string, error) {
 
 func (s *AuthService) GetProfile(ctx context.Context, userID string) (*models.UserProfile, error) {
 	var user models.UserProfile
-	query := `SELECT id, phone, name, city, car_clearance, created_at FROM users WHERE id = $1;`
+	query := `
+		SELECT 
+			id, phone, name, city, car_clearance, 
+			COALESCE(total_distance_meters, 0), streak_days, unlocked_achievements, created_at 
+		FROM users 
+		WHERE id = $1;
+	`
 	err := s.pool.QueryRow(ctx, query, userID).Scan(
-		&user.ID, &user.Phone, &user.Name, &user.City, &user.CarClearance, &user.CreatedAt,
+		&user.ID, &user.Phone, &user.Name, &user.City, &user.CarClearance, 
+		&user.TotalDistanceMeters, &user.StreakDays, &user.UnlockedAchievements, &user.CreatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -284,6 +317,54 @@ func (s *AuthService) GetProfile(ctx context.Context, userID string) (*models.Us
 		}
 		return nil, err
 	}
+
+	var defectsCount int
+	defectsQuery := `SELECT COUNT(*)::int FROM telemetry WHERE user_id = $1;`
+	_ = s.pool.QueryRow(ctx, defectsQuery, userID).Scan(&defectsCount)
+	user.TotalDefects = defectsCount
+
+	km := user.TotalDistanceMeters / 1000.0
+	user.Rating = int(math.Round(km*10)) +
+		(defectsCount * 50) +
+		(user.UnlockedAchievements * 100) +
+		(user.StreakDays * 20)
+
+	user.SavedSuspensions = int(math.Ceil(float64(defectsCount) * 0.15))
+
+	if user.TotalDistanceMeters > 0 || user.TotalDefects > 0 {
+		percentileQuery := `
+			WITH active_users AS (
+				SELECT 
+					u.id,
+					(ROUND(COALESCE(u.total_distance_meters, 0) / 100.0) + 
+					 (COUNT(t.id) * 50) + 
+					 (u.unlocked_achievements * 100) + 
+					 (u.streak_days * 20)) AS score
+				FROM users u
+				LEFT JOIN telemetry t ON t.user_id = u.id
+				WHERE COALESCE(u.total_distance_meters, 0) > 0 OR t.id IS NOT NULL
+				GROUP BY u.id, u.total_distance_meters, u.unlocked_achievements, u.streak_days
+			),
+			ranked AS (
+				SELECT 
+					id,
+					PERCENT_RANK() OVER (ORDER BY score DESC) AS prank
+				FROM active_users
+			)
+			SELECT prank FROM ranked WHERE id = $1;
+		`
+		var prank float64
+		if err := s.pool.QueryRow(ctx, percentileQuery, userID).Scan(&prank); err == nil {
+			pct := int(math.Ceil(prank * 100))
+			if pct < 1 {
+				pct = 1
+			}
+			user.CommunityPercentile = pct
+		}
+	} else {
+		user.CommunityPercentile = 0
+	}
+
 	return &user, nil
 }
 
@@ -303,9 +384,52 @@ func (s *AuthService) UpdateProfile(ctx context.Context, userID string, p *model
 		user.CarClearance = *p.CarClearance
 	}
 
-	query := `UPDATE users SET name = $1, city = $2, car_clearance = $3 WHERE id = $4;`
+	query := `
+		UPDATE users 
+		SET name = $1, city = $2, car_clearance = $3 
+		WHERE id = $4;
+	`
 	if _, err := s.pool.Exec(ctx, query, user.Name, user.City, user.CarClearance, userID); err != nil {
 		return nil, err
 	}
-	return user, nil
+	return s.GetProfile(ctx, userID)
+}
+
+func (s *AuthService) SyncStats(ctx context.Context, userID string, streakDays, unlockedAchievements int) (*models.UserProfile, error) {
+	query := `
+		UPDATE users 
+		SET streak_days = $1, unlocked_achievements = $2 
+		WHERE id = $3;
+	`
+	if _, err := s.pool.Exec(ctx, query, streakDays, unlockedAchievements, userID); err != nil {
+		return nil, fmt.Errorf("ошибка синхронизации статистики пользователя: %w", err)
+	}
+	return s.GetProfile(ctx, userID)
+}
+
+func (s *AuthService) DeleteAccount(ctx context.Context, userID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("ошибка запуска транзакции: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `UPDATE telemetry SET user_id = 'anonymous' WHERE user_id = $1;`, userID); err != nil {
+		return fmt.Errorf("ошибка анонимизации телеметрии: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1;`, userID); err != nil {
+		return fmt.Errorf("ошибка удаления пользователя: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
+	if refreshToken == "" {
+		return nil
+	}
+	tokenHash := s.hashString(refreshToken)
+	_, err := s.pool.Exec(ctx, "UPDATE refresh_tokens SET revoked = true WHERE token_hash = $1;", tokenHash)
+	return err
 }

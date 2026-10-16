@@ -2,7 +2,9 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"road_pulse/backend/internal/models"
 	"road_pulse/backend/internal/service"
@@ -32,7 +34,6 @@ func (h *TelemetryHandler) PostTelemetry(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Если пользователь авторизован по JWT, подставляем его реальный ID
 	if authUserID, ok := r.Context().Value(ContextUserIDKey).(string); ok && authUserID != "" {
 		payload.UserID = authUserID
 	} else if payload.UserID == "" {
@@ -94,4 +95,59 @@ func (h *TelemetryHandler) PostDistance(w http.ResponseWriter, r *http.Request) 
 
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (h *TelemetryHandler) GetComments(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	clusterIDStr := r.URL.Query().Get("cluster_id")
+	if clusterIDStr == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Параметр cluster_id обязателен"})
+		return
+	}
+
+	var clusterID int64
+	if _, err := fmt.Sscanf(clusterIDStr, "%d", &clusterID); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Некорректный cluster_id"})
+		return
+	}
+
+	comments, err := h.service.GetComments(r.Context(), clusterID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(comments)
+}
+
+func (h *TelemetryHandler) PostComment(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	userID, ok := r.Context().Value(ContextUserIDKey).(string)
+	if !ok || userID == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Требуется авторизация"})
+		return
+	}
+
+	var payload models.CreateCommentPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.ClusterID <= 0 || strings.TrimSpace(payload.Text) == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Передайте корректный cluster_id и текст комментария"})
+		return
+	}
+
+	// Защита от подмены автора: имя пользователя извлекается из профиля users по токену в БД
+	comment, err := h.service.AddComment(r.Context(), payload.ClusterID, userID, "", payload.Text)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(comment)
 }

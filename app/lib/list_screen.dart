@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:geocoding/geocoding.dart';
 import 'app_theme.dart';
+import 'calculations.dart';
+import 'constants.dart';
 import 'pothole_details_screen.dart';
 import 'api_service.dart';
 import 'widgets/road_ribbon.dart';
@@ -49,21 +51,7 @@ class _ListScreenState extends State<ListScreen> {
     setState(() {
       _filteredBumps = _allBumps.where((bump) {
         final bumpDate = _parseDate(bump);
-        final difference = now.difference(bumpDate);
-
-        switch (_activeFilterIndex) {
-          case 0: // Сегодня
-            return bumpDate.year == now.year &&
-                bumpDate.month == now.month &&
-                bumpDate.day == now.day;
-          case 1: // Неделя
-            return difference.inDays <= 7;
-          case 2: // Месяц
-            return difference.inDays <= 30;
-          case 3: // Всё время
-          default:
-            return true;
-        }
+        return isDateInFilterPeriod(bumpDate, now, _activeFilterIndex);
       }).toList();
 
       _filteredBumps.sort((a, b) {
@@ -75,11 +63,7 @@ class _ListScreenState extends State<ListScreen> {
   }
 
   DateTime _parseDate(dynamic bump) {
-    final dateStr = bump['created_at'] ?? bump['timestamp'];
-    if (dateStr != null) {
-      return DateTime.tryParse(dateStr.toString()) ?? DateTime.now();
-    }
-    return DateTime.now();
+    return parseDefectDate(bump['created_at'] ?? bump['timestamp']);
   }
 
   Future<String> _getAddress(double lat, double lon) async {
@@ -164,9 +148,9 @@ class _ListScreenState extends State<ListScreen> {
 
     for (final b in _allBumps) {
       final double force = (b['max_force'] ?? 0.0).toDouble();
-      if (force > 30) {
+      if (force > kSeverityHard) {
         countS3++;
-      } else if (force > 20) {
+      } else if (force > kSeverityMedium) {
         countS2++;
       } else {
         countS1++;
@@ -329,12 +313,12 @@ class _ListScreenState extends State<ListScreen> {
     String levelText = "РОВНО";
     String sizeStr = "S";
 
-    if (force > 30) {
+    if (force > kSeverityHard) {
       levelColor = colors.s3;
       levelBg = colors.s3Soft;
       levelText = "ЖЁСТКО";
       sizeStr = "L";
-    } else if (force > 20) {
+    } else if (force > kSeverityMedium) {
       levelColor = colors.s2;
       levelBg = colors.s2Soft;
       levelText = "ЗАМЕТНО";
@@ -358,14 +342,15 @@ class _ListScreenState extends State<ListScreen> {
           onTap: () {
             Navigator.push(
               context,
-              MaterialPageRoute(builder: (_) => const PotholeDetailsScreen()),
+              MaterialPageRoute(
+                builder: (_) => PotholeDetailsScreen(defect: bump),
+              ),
             );
           },
           child: Padding(
             padding: const EdgeInsets.all(14),
             child: Row(
               children: [
-                // Текстурный плейсхолдер с бейджем размера S/M/L
                 Stack(
                   children: [
                     Container(

@@ -219,6 +219,67 @@ class _AccountScreenState extends State<AccountScreen> {
     );
   }
 
+  Future<void> _handleDeleteAccount(PolotnoColors colors) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: colors.surf,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Text(
+            "Удалить аккаунт?",
+            style: TextStyle(
+              fontFamily: AppTheme.fontDisplay,
+              fontSize: 18,
+              color: colors.ink,
+            ),
+          ),
+          content: Text(
+            "Ваш профиль и номер телефона будут безвозвратно удалены. Записанные дефекты полотна останутся на карте анонимно.",
+            style: TextStyle(
+              fontFamily: AppTheme.fontUi,
+              fontSize: 13.5,
+              color: colors.ink2,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text("Отмена", style: TextStyle(color: colors.ink3)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: colors.s3,
+                foregroundColor: Colors.white,
+                elevation: 0,
+              ),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("Удалить"),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed == true) {
+      final success = await ApiService.deleteAccount();
+      if (!mounted) return;
+      if (success) {
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (_) => const AuthScreen()),
+          (route) => false,
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Не удалось удалить аккаунт на сервере")),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
@@ -362,7 +423,7 @@ class _AccountScreenState extends State<AccountScreen> {
                   titleColor: colors.s3,
                   subtitle:
                       "Номер и профиль стираются, дефекты станут анонимными",
-                  onTap: _handleLogout,
+                  onTap: () => _handleDeleteAccount(colors),
                 ),
               ],
             ),

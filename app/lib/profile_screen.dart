@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'achievement_service.dart';
 import 'api_service.dart';
 import 'app_theme.dart';
+import 'calculations.dart';
+import 'fresh_prefs.dart';
 import 'screens/account_screen.dart';
 import 'widgets/road_ribbon.dart';
 
@@ -14,13 +16,26 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
+  late Future<UserStats> _statsFuture;
+
   @override
   void initState() {
     super.initState();
-    // При открытии профиля перезагружаем SharedPreferences
+    _statsFuture = freshPrefs().then((_) => ApiService.getUserStats());
     AchievementService.getTotalDistanceMeters().then((_) {
       if (mounted) setState(() {});
     });
+  }
+
+  Future<void> _refreshProfileData() async {
+    await freshPrefs();
+    await AchievementService.getTotalDistanceMeters();
+    if (mounted) {
+      setState(() {
+        _statsFuture = ApiService.getUserStats();
+      });
+    }
+    await _statsFuture;
   }
 
   @override
@@ -33,10 +48,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         bottom: false,
         child: RefreshIndicator(
           color: colors.mark,
-          onRefresh: () async {
-            await AchievementService.getTotalDistanceMeters();
-            if (mounted) setState(() {});
-          },
+          onRefresh: _refreshProfileData,
           child: ListView(
             physics: const AlwaysScrollableScrollPhysics(
               parent: BouncingScrollPhysics(),
@@ -44,8 +56,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
             padding: const EdgeInsets.only(bottom: 120),
             children: [
               _buildHeader(context, colors),
-              _buildCommunityBadge(colors),
-              _buildStatsGrid(colors),
+              _buildCommunityBadge(colors, _statsFuture),
+              _buildStatsGrid(colors, _statsFuture),
               _buildLastTrip(colors),
               _buildAchievements(colors),
               _buildActivityHeatmap(colors),
@@ -146,7 +158,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     context,
                     MaterialPageRoute(builder: (_) => const AccountScreen()),
                   );
-                  if (mounted) setState(() {});
+                  if (mounted) {
+                    setState(() {
+                      _statsFuture = ApiService.getUserStats();
+                    });
+                  }
                 },
               ),
             ],
@@ -156,16 +172,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  Widget _buildCommunityBadge(PolotnoColors colors) {
+  Widget _buildCommunityBadge(PolotnoColors colors, Future<UserStats> statsFuture) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
       child: Align(
         alignment: Alignment.centerLeft,
         child: FutureBuilder<UserStats>(
-          future: ApiService.getUserStats(),
+          future: statsFuture,
           builder: (context, snapshot) {
-            final rating = snapshot.data?.rating ?? 0;
-            final badgeText = _getCommunityBadgeText(rating);
+            final stats = snapshot.data;
+            final rating = stats?.rating ?? 0;
+            final percentile = stats?.communityPercentile;
+            final badgeText = communityBadgeText(rating, percentile: percentile);
 
             return Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
@@ -197,22 +215,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  /// Динамический расчёт ранга и процентиля пользователя на основе рейтинга
-  static String _getCommunityBadgeText(int rating) {
-    if (rating >= 2500) return "Топ 1% сообщества";
-    if (rating >= 1500) return "Топ 5% сообщества";
-    if (rating >= 800) return "Топ 10% сообщества";
-    if (rating >= 400) return "Топ 25% сообщества";
-    if (rating >= 200) return "Топ 50% сообщества";
-    if (rating >= 50) return "Топ 80% сообщества";
-    return "Новый участник";
-  }
-
-  Widget _buildStatsGrid(PolotnoColors colors) {
+  Widget _buildStatsGrid(PolotnoColors colors, Future<UserStats> statsFuture) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
       child: FutureBuilder<UserStats>(
-        future: ApiService.getUserStats(),
+        future: statsFuture,
         builder: (context, snapshot) {
           final stats = snapshot.data ?? UserStats.empty();
 
@@ -340,109 +347,167 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Widget _buildLastTrip(PolotnoColors colors) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 26, 20, 0),
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                "Последняя поездка",
-                style: TextStyle(
-                  fontFamily: AppTheme.fontUi,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: colors.ink,
-                  letterSpacing: -0.3,
+      child: FutureBuilder<TripData?>(
+        future: ApiService.getLastTrip(),
+        builder: (context, snapshot) {
+          final trip = snapshot.data;
+
+          if (trip == null) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "Последняя поездка",
+                  style: TextStyle(
+                    fontFamily: AppTheme.fontUi,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: colors.ink,
+                    letterSpacing: -0.3,
+                  ),
                 ),
+                const SizedBox(height: 11),
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: colors.surf,
+                    borderRadius: BorderRadius.circular(22),
+                    border: Border.all(color: colors.edge2),
+                  ),
+                  child: Center(
+                    child: Text(
+                      "Нет завершённых поездок. Запустите запись в разделе «Запись».",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontFamily: AppTheme.fontUi,
+                        fontSize: 13,
+                        color: colors.ink3,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }
+
+          final now = DateTime.now();
+          final isToday = trip.startedAt.year == now.year &&
+              trip.startedAt.month == now.month &&
+              trip.startedAt.day == now.day;
+          final dateStr = isToday
+              ? "СЕГОДНЯ"
+              : "${trip.startedAt.day.toString().padLeft(2, '0')}.${trip.startedAt.month.toString().padLeft(2, '0')}";
+
+          final km = (trip.distanceMeters / 1000.0).toStringAsFixed(1);
+          final durationMin = trip.endedAt != null
+              ? trip.endedAt!.difference(trip.startedAt).inMinutes
+              : 0;
+          final durationStr = durationMin > 0 ? "$durationMin мин" : "< 1 мин";
+
+          return Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    "Последняя поездка",
+                    style: TextStyle(
+                      fontFamily: AppTheme.fontUi,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: colors.ink,
+                      letterSpacing: -0.3,
+                    ),
+                  ),
+                  Text(
+                    dateStr,
+                    style: TextStyle(
+                      fontFamily: AppTheme.fontMono,
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 1.2,
+                      color: colors.ink3,
+                    ),
+                  ),
+                ],
               ),
-              Text(
-                "СЕГОДНЯ",
-                style: TextStyle(
-                  fontFamily: AppTheme.fontMono,
-                  fontSize: 9.5,
-                  fontWeight: FontWeight.w500,
-                  letterSpacing: 1.2,
-                  color: colors.ink3,
+              const SizedBox(height: 11),
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: colors.surf,
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: colors.edge2),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text(
+                          "$km КМ",
+                          style: TextStyle(
+                            fontFamily: AppTheme.fontDisplay,
+                            fontSize: 28,
+                            fontWeight: FontWeight.w700,
+                            color: colors.ink,
+                            letterSpacing: -0.8,
+                            height: 0.9,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          "· $durationStr · ${trip.defectsCount} дефектов",
+                          style: TextStyle(
+                            fontFamily: AppTheme.fontMono,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                            color: colors.ink2,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 15),
+                    RoadRibbon(
+                      height: 12,
+                      segments: [
+                        RibbonSegment(flex: trip.smoothRatio, color: colors.s1),
+                        RibbonSegment(flex: trip.mediumRatio, color: colors.s2),
+                        RibbonSegment(flex: trip.hardRatio, color: colors.s3),
+                      ],
+                    ),
+                    const SizedBox(height: 7),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          "СТАРТ",
+                          style: TextStyle(
+                            fontFamily: AppTheme.fontMono,
+                            fontSize: 9.5,
+                            color: colors.ink3,
+                            letterSpacing: 1.0,
+                          ),
+                        ),
+                        Text(
+                          "ФИНИШ",
+                          style: TextStyle(
+                            fontFamily: AppTheme.fontMono,
+                            fontSize: 9.5,
+                            color: colors.ink3,
+                            letterSpacing: 1.0,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ],
-          ),
-          const SizedBox(height: 11),
-          Container(
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              color: colors.surf,
-              borderRadius: BorderRadius.circular(22),
-              border: Border.all(color: colors.edge2),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Text(
-                      "ТРЕК",
-                      style: TextStyle(
-                        fontFamily: AppTheme.fontDisplay,
-                        fontSize: 28,
-                        fontWeight: FontWeight.w700,
-                        color: colors.ink,
-                        letterSpacing: -0.8,
-                        height: 0.9,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      "АКТИВНЫЙ МОНИТОРИНГ",
-                      style: TextStyle(
-                        fontFamily: AppTheme.fontMono,
-                        fontSize: 10,
-                        fontWeight: FontWeight.w500,
-                        letterSpacing: 1.2,
-                        color: colors.s1,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 15),
-                RoadRibbon(
-                  height: 12,
-                  segments: [
-                    RibbonSegment(flex: 0.70, color: colors.s1),
-                    RibbonSegment(flex: 0.15, color: colors.s2),
-                    RibbonSegment(flex: 0.15, color: colors.s3),
-                  ],
-                ),
-                const SizedBox(height: 7),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      "СТАРТ",
-                      style: TextStyle(
-                        fontFamily: AppTheme.fontMono,
-                        fontSize: 9.5,
-                        color: colors.ink3,
-                        letterSpacing: 1.0,
-                      ),
-                    ),
-                    Text(
-                      "ФИНИШ",
-                      style: TextStyle(
-                        fontFamily: AppTheme.fontMono,
-                        fontSize: 9.5,
-                        color: colors.ink3,
-                        letterSpacing: 1.0,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
+          );
+        },
       ),
     );
   }

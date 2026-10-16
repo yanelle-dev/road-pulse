@@ -1,12 +1,193 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:latlong2/latlong.dart' hide Path;
+import 'api_service.dart';
 import 'app_theme.dart';
+import 'constants.dart';
 
-class PotholeDetailsScreen extends StatelessWidget {
-  const PotholeDetailsScreen({super.key});
+class PotholeDetailsScreen extends StatefulWidget {
+  final Map<String, dynamic>? defect;
+
+  const PotholeDetailsScreen({super.key, this.defect});
+
+  @override
+  State<PotholeDetailsScreen> createState() => _PotholeDetailsScreenState();
+}
+
+class _PotholeDetailsScreenState extends State<PotholeDetailsScreen> {
+  String? _resolvedAddress;
+  late Future<List<DefectComment>> _commentsFuture;
+
+  int get _clusterId => ((widget.defect?['cluster_id'] ?? widget.defect?['id'] ?? 0) as num).toInt();
+  double? get _lat => (widget.defect?['lat'] ?? widget.defect?['latitude'] as num?)?.toDouble();
+  double? get _lon => (widget.defect?['lon'] ?? widget.defect?['longitude'] as num?)?.toDouble();
+  double? get _force => (widget.defect?['max_force'] ?? widget.defect?['bump_force'] as num?)?.toDouble();
+  String get _defectType => widget.defect?['defect_type']?.toString() ?? 'pothole';
+  int get _uniqueUsers => (widget.defect?['unique_users'] as num?)?.toInt() ?? 1;
+  int get _totalHits => (widget.defect?['total_hits'] as num?)?.toInt() ?? 1;
+  bool get _isConfirmed => widget.defect?['is_confirmed'] == true || _uniqueUsers >= 2 || _totalHits >= 3;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolveAddress();
+    _commentsFuture = ApiService.getComments(_clusterId);
+  }
+
+  void _reloadComments() {
+    setState(() {
+      _commentsFuture = ApiService.getComments(_clusterId);
+    });
+  }
+
+  Future<void> _resolveAddress() async {
+    final lat = _lat;
+    final lon = _lon;
+    if (lat == null || lon == null) return;
+
+    try {
+      final placemarks = await Geocoding().placemarkFromCoordinates(lat, lon);
+      if (placemarks.isNotEmpty && mounted) {
+        final p = placemarks.first;
+        setState(() {
+          _resolvedAddress = "${p.street ?? 'Улица'}, ${p.locality ?? 'Москва'}";
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _showAddCommentDialog(PolotnoColors colors) async {
+    final textController = TextEditingController();
+
+    final added = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: colors.surf,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text(
+            "Комментарий о дефекте",
+            style: TextStyle(
+              fontFamily: AppTheme.fontDisplay,
+              fontSize: 18,
+              color: colors.ink,
+            ),
+          ),
+          content: TextField(
+            controller: textController,
+            maxLines: 3,
+            style: TextStyle(fontFamily: AppTheme.fontUi, color: colors.ink),
+            decoration: InputDecoration(
+              hintText: "Например, яма стала глубже, объезжать справа...",
+              hintStyle: TextStyle(color: colors.ink3),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text("Отмена", style: TextStyle(color: colors.ink3)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: colors.mark,
+                foregroundColor: colors.onMark,
+                elevation: 0,
+              ),
+              onPressed: () async {
+                final txt = textController.text.trim();
+                if (txt.isEmpty) return;
+                final ok = await ApiService.addComment(clusterId: _clusterId, text: txt);
+                if (ctx.mounted) Navigator.pop(ctx, ok);
+              },
+              child: const Text("Отправить"),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (added == true && mounted) {
+      _reloadComments();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Комментарий успешно добавлен")),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    final lat = _lat;
+    final lon = _lon;
+    final force = _force;
+
+    if (lat == null || lon == null || force == null) {
+      return Scaffold(
+        backgroundColor: colors.asphalt,
+        appBar: AppBar(
+          backgroundColor: colors.asphalt,
+          elevation: 0,
+          leading: IconButton(
+            icon: Icon(Icons.arrow_back_rounded, color: colors.ink),
+            onPressed: () => Navigator.pop(context),
+          ),
+        ),
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.location_off_outlined, size: 54, color: colors.ink3),
+              const SizedBox(height: 16),
+              Text(
+                "Данные дефекта недоступны",
+                style: TextStyle(
+                  fontFamily: AppTheme.fontDisplay,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: colors.ink,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                "Информация о точке была удалена или не передана",
+                style: TextStyle(
+                  fontFamily: AppTheme.fontUi,
+                  fontSize: 13,
+                  color: colors.ink2,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Color levelColor = colors.s1;
+    Color levelBg = colors.s1Soft;
+    String levelText = "РОВНО";
+    String sizeStr = "S";
+
+    if (force > kSeverityHard) {
+      levelColor = colors.s3;
+      levelBg = colors.s3Soft;
+      levelText = "ЖЁСТКО";
+      sizeStr = "L";
+    } else if (force > kSeverityMedium) {
+      levelColor = colors.s2;
+      levelBg = colors.s2Soft;
+      levelText = "ЗАМЕТНО";
+      sizeStr = "M";
+    }
+
+    final title = _defectType == 'rough_road'
+        ? "Неровная дорога (тряска / колея)"
+        : "Дефект дорожного полотна";
+
+    final coordStr = "${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)}";
+    final addressDisplay = _resolvedAddress != null ? "$coordStr · $_resolvedAddress" : coordStr;
 
     return Scaffold(
       backgroundColor: colors.asphalt,
@@ -19,11 +200,10 @@ class PotholeDetailsScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Бейдж силы удара
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                     decoration: BoxDecoration(
-                      color: colors.s3Soft,
+                      color: levelBg,
                       borderRadius: BorderRadius.circular(999),
                     ),
                     child: Row(
@@ -33,18 +213,18 @@ class PotholeDetailsScreen extends StatelessWidget {
                           width: 7,
                           height: 7,
                           decoration: BoxDecoration(
-                            color: colors.s3,
+                            color: levelColor,
                             shape: BoxShape.circle,
                           ),
                         ),
                         const SizedBox(width: 6),
                         Text(
-                          "ЖЁСТКО · 32 G",
+                          "$levelText · ${force.toStringAsFixed(1)} G",
                           style: TextStyle(
                             fontFamily: AppTheme.fontUi,
                             fontSize: 11,
                             fontWeight: FontWeight.w700,
-                            color: colors.s3,
+                            color: levelColor,
                             letterSpacing: 0.3,
                           ),
                         ),
@@ -52,22 +232,20 @@ class PotholeDetailsScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 12),
-
-                  // Заголовок дефекта
                   Text(
-                    "Яма в правом ряду",
+                    title,
                     style: TextStyle(
                       fontFamily: AppTheme.fontDisplay,
-                      fontSize: 28,
+                      fontSize: 26,
                       fontWeight: FontWeight.w700,
                       color: colors.ink,
-                      letterSpacing: -1.0,
-                      height: 1.05,
+                      letterSpacing: -0.8,
+                      height: 1.1,
                     ),
                   ),
                   const SizedBox(height: 7),
                   Text(
-                    "55.75121, 37.61843 · Ленинградский пр-т, 78",
+                    addressDisplay,
                     style: TextStyle(
                       fontFamily: AppTheme.fontMono,
                       fontSize: 11.5,
@@ -75,28 +253,16 @@ class PotholeDetailsScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 20),
-
-                  // 3 факта
-                  _buildFactsGrid(colors),
+                  _buildFactsGrid(colors, sizeStr, force, _uniqueUsers),
                   const SizedBox(height: 10),
-
-                  // График профиля удара
-                  _buildImpactProfile(colors),
+                  _buildImpactProfile(colors, force, levelColor),
                   const SizedBox(height: 10),
-
-                  // Карточка правила подтверждения DBSCAN
-                  _buildConfirmationCard(colors),
+                  _buildConfirmationCard(colors, _isConfirmed, _uniqueUsers, _totalHits),
                   const SizedBox(height: 10),
-
-                  // Мини-карта дефекта
-                  _buildMiniMap(colors),
+                  _buildMiniMap(colors, isDark, LatLng(lat, lon), levelColor),
                   const SizedBox(height: 10),
-
-                  // Кнопки действий
-                  _buildActionButtons(colors),
+                  _buildActionButtons(context, colors),
                   const SizedBox(height: 10),
-
-                  // Блок комментариев
                   _buildCommentsSection(colors),
                 ],
               ),
@@ -109,7 +275,7 @@ class PotholeDetailsScreen extends StatelessWidget {
 
   Widget _buildSliverAppBar(BuildContext context, PolotnoColors colors) {
     return SliverAppBar(
-      expandedHeight: 280,
+      expandedHeight: 240,
       pinned: true,
       elevation: 0,
       backgroundColor: colors.asphalt,
@@ -131,15 +297,23 @@ class PotholeDetailsScreen extends StatelessWidget {
       actions: [
         Padding(
           padding: const EdgeInsets.all(8.0),
-          child: Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: colors.glass,
-              shape: BoxShape.circle,
-              border: Border.all(color: colors.edge),
+          child: InkWell(
+            onTap: () {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Ссылка на дефект скопирована")),
+              );
+            },
+            borderRadius: BorderRadius.circular(999),
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: colors.glass,
+                shape: BoxShape.circle,
+                border: Border.all(color: colors.edge),
+              ),
+              child: Icon(Icons.share_outlined, color: colors.ink, size: 19),
             ),
-            child: Icon(Icons.share_outlined, color: colors.ink, size: 19),
           ),
         ),
       ],
@@ -149,14 +323,13 @@ class PotholeDetailsScreen extends StatelessWidget {
           children: [
             Container(
               color: colors.surf2,
-              child: Icon(Icons.broken_image_rounded, size: 90, color: colors.ink3),
+              child: Icon(Icons.broken_image_rounded, size: 80, color: colors.ink3),
             ),
-            // Градиентная вуаль перехода в фон
             Positioned(
               bottom: 0,
               left: 0,
               right: 0,
-              height: 120,
+              height: 100,
               child: Container(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
@@ -167,55 +340,20 @@ class PotholeDetailsScreen extends StatelessWidget {
                 ),
               ),
             ),
-            // Точки пагинации фото
-            Positioned(
-              bottom: 24,
-              left: 20,
-              child: Row(
-                children: [
-                  Container(
-                    width: 20,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      color: colors.mark,
-                      borderRadius: BorderRadius.circular(3),
-                    ),
-                  ),
-                  const SizedBox(width: 5),
-                  Container(
-                    width: 6,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      color: colors.ink.withValues(alpha: 0.3),
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 5),
-                  Container(
-                    width: 6,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      color: colors.ink.withValues(alpha: 0.3),
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ],
-              ),
-            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildFactsGrid(PolotnoColors colors) {
+  Widget _buildFactsGrid(PolotnoColors colors, String sizeStr, double force, int uniqueUsers) {
     return Row(
       children: [
-        _buildFactItem(colors, "РАЗМЕР", "L"),
+        _buildFactItem(colors, "РАЗМЕР", sizeStr),
         const SizedBox(width: 8),
-        _buildFactItem(colors, "ГЛУБИНА", "~15 см"),
+        _buildFactItem(colors, "СИЛА УДАРА", "${force.toStringAsFixed(1)} G"),
         const SizedBox(width: 8),
-        _buildFactItem(colors, "ВОДИТЕЛЕЙ", "12"),
+        _buildFactItem(colors, "ВОДИТЕЛЕЙ", "$uniqueUsers"),
       ],
     );
   }
@@ -247,7 +385,7 @@ class PotholeDetailsScreen extends StatelessWidget {
               value,
               style: TextStyle(
                 fontFamily: AppTheme.fontDisplay,
-                fontSize: 21,
+                fontSize: 19,
                 fontWeight: FontWeight.w700,
                 color: colors.ink,
                 letterSpacing: -0.6,
@@ -260,7 +398,9 @@ class PotholeDetailsScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildImpactProfile(PolotnoColors colors) {
+  Widget _buildImpactProfile(PolotnoColors colors, double force, Color levelColor) {
+    final peakG = (force / 3.8).toStringAsFixed(1);
+
     return Container(
       padding: const EdgeInsets.all(17),
       decoration: BoxDecoration(
@@ -284,12 +424,12 @@ class PotholeDetailsScreen extends StatelessWidget {
                 ),
               ),
               Text(
-                "пик 8,4 g",
+                "пик $peakG g",
                 style: TextStyle(
                   fontFamily: AppTheme.fontMono,
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
-                  color: colors.s3,
+                  color: levelColor,
                 ),
               ),
             ],
@@ -300,7 +440,7 @@ class PotholeDetailsScreen extends StatelessWidget {
             width: double.infinity,
             child: CustomPaint(
               painter: ImpactSpikePainter(
-                lineColor: colors.s3,
+                lineColor: levelColor,
                 axisColor: colors.edge,
               ),
             ),
@@ -310,7 +450,7 @@ class PotholeDetailsScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildConfirmationCard(PolotnoColors colors) {
+  Widget _buildConfirmationCard(PolotnoColors colors, bool isConfirmed, int uniqueUsers, int totalHits) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
@@ -320,7 +460,11 @@ class PotholeDetailsScreen extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Icon(Icons.check_circle_rounded, color: colors.s1, size: 20),
+          Icon(
+            isConfirmed ? Icons.check_circle_rounded : Icons.pending_outlined,
+            color: isConfirmed ? colors.s1 : colors.markInk,
+            size: 22,
+          ),
           const SizedBox(width: 12),
           Expanded(
             child: Text.rich(
@@ -331,30 +475,25 @@ class PotholeDetailsScreen extends StatelessWidget {
                   color: colors.ink2,
                   height: 1.45,
                 ),
-                children: [
-                  TextSpan(
-                    text: "Подтверждено. ",
-                    style: TextStyle(color: colors.ink, fontWeight: FontWeight.w700),
-                  ),
-                  const TextSpan(text: "Правило кластеризации: "),
-                  TextSpan(
-                    text: "≥2 водителя",
-                    style: TextStyle(
-                      fontFamily: AppTheme.fontMono,
-                      fontSize: 11.5,
-                      color: colors.ink,
-                    ),
-                  ),
-                  const TextSpan(text: " или "),
-                  TextSpan(
-                    text: "≥3 попадания",
-                    style: TextStyle(
-                      fontFamily: AppTheme.fontMono,
-                      fontSize: 11.5,
-                      color: colors.ink,
-                    ),
-                  ),
-                ],
+                children: isConfirmed
+                    ? [
+                        TextSpan(
+                          text: "Подтверждено сообществом. ",
+                          style: TextStyle(color: colors.ink, fontWeight: FontWeight.w700),
+                        ),
+                        TextSpan(
+                          text: "Правило: ≥2 водителя или ≥3 попадания (зафиксировано: $uniqueUsers вод., $totalHits ударов).",
+                        ),
+                      ]
+                    : [
+                        TextSpan(
+                          text: "Ожидает подтверждения. ",
+                          style: TextStyle(color: colors.markInk, fontWeight: FontWeight.w700),
+                        ),
+                        TextSpan(
+                          text: "Нужно: ≥2 водителя или ≥3 попадания (сейчас: $uniqueUsers вод., $totalHits ударов).",
+                        ),
+                      ],
               ),
             ),
           ),
@@ -363,148 +502,250 @@ class PotholeDetailsScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildMiniMap(PolotnoColors colors) {
+  Widget _buildMiniMap(PolotnoColors colors, bool isDark, LatLng point, Color levelColor) {
     return Container(
-      height: 136,
+      height: 160,
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: colors.voidBg,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: colors.edge2),
       ),
-      child: Stack(
-        alignment: Alignment.center,
+      child: FlutterMap(
+        options: MapOptions(
+          initialCenter: point,
+          initialZoom: 15.5,
+          interactionOptions: const InteractionOptions(flags: InteractiveFlag.none),
+        ),
         children: [
-          // Стилизованная схема дороги
-          CustomPaint(
-            size: const Size(double.infinity, 136),
-            painter: MiniRoadPainter(roadColor: colors.surf),
+          TileLayer(
+            urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+            userAgentPackageName: 'com.roadpulse.app',
+            tileBuilder: isDark ? darkModeTileBuilder : null,
           ),
-          // Точка ямы с ореолом
-          Container(
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-              color: colors.s3Soft,
-              shape: BoxShape.circle,
-            ),
-          ),
-          Container(
-            width: 15,
-            height: 15,
-            decoration: BoxDecoration(
-              color: colors.s3,
-              shape: BoxShape.circle,
-              border: Border.all(color: colors.asphalt, width: 3),
-            ),
+          CircleLayer(
+            circles: [
+              CircleMarker(
+                point: point,
+                color: levelColor.withValues(alpha: 0.25),
+                useRadiusInMeter: true,
+                radius: 35,
+              ),
+              CircleMarker(
+                point: point,
+                color: levelColor,
+                borderColor: colors.asphalt,
+                borderStrokeWidth: 3,
+                useRadiusInMeter: true,
+                radius: 12,
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
-  Widget _buildActionButtons(PolotnoColors colors) {
+  Widget _buildActionButtons(BuildContext context, PolotnoColors colors) {
     return Column(
       children: [
         Row(
           children: [
-            _buildActionItem(colors, Icons.navigation_outlined, "Объехать", colors.markInk),
+            _buildActionItem(
+              context,
+              colors,
+              Icons.navigation_outlined,
+              "Объехать",
+              colors.markInk,
+              () => ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Маршрут объезда строится...")),
+              ),
+            ),
             const SizedBox(width: 8),
-            _buildActionItem(colors, Icons.check_rounded, "Она ещё тут", colors.s1),
+            _buildActionItem(
+              context,
+              colors,
+              Icons.check_rounded,
+              "Она ещё тут",
+              colors.s1,
+              () => ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Спасибо! Ваше подтверждение учтено.")),
+              ),
+            ),
           ],
         ),
         const SizedBox(height: 8),
         Row(
           children: [
-            _buildActionItem(colors, Icons.build_outlined, "Починили", colors.ink2),
+            _buildActionItem(
+              context,
+              colors,
+              Icons.build_outlined,
+              "Починили",
+              colors.ink2,
+              () => ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Заявка о ремонте отправлена на проверку.")),
+              ),
+            ),
             const SizedBox(width: 8),
-            _buildActionItem(colors, Icons.share_outlined, "Поделиться", colors.ink2),
+            _buildActionItem(
+              context,
+              colors,
+              Icons.share_outlined,
+              "Поделиться",
+              colors.ink2,
+              () => ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Ссылка скопирована в буфер обмена.")),
+              ),
+            ),
           ],
         ),
       ],
     );
   }
 
-  Widget _buildActionItem(PolotnoColors colors, IconData icon, String label, Color iconColor) {
+  Widget _buildActionItem(
+    BuildContext context,
+    PolotnoColors colors,
+    IconData icon,
+    String label,
+    Color iconColor,
+    VoidCallback onTap,
+  ) {
     return Expanded(
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
-        decoration: BoxDecoration(
-          color: colors.surf,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: colors.edge2),
-        ),
-        child: Row(
-          children: [
-            Icon(icon, color: iconColor, size: 18),
-            const SizedBox(width: 10),
-            Text(
-              label,
-              style: TextStyle(
-                fontFamily: AppTheme.fontUi,
-                fontSize: 13.5,
-                fontWeight: FontWeight.w600,
-                color: colors.ink,
-                letterSpacing: -0.2,
-              ),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+            decoration: BoxDecoration(
+              color: colors.surf,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: colors.edge2),
             ),
-          ],
+            child: Row(
+              children: [
+                Icon(icon, color: iconColor, size: 18),
+                const SizedBox(width: 10),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontFamily: AppTheme.fontUi,
+                    fontSize: 13.0,
+                    fontWeight: FontWeight.w600,
+                    color: colors.ink,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
   }
 
   Widget _buildCommentsSection(PolotnoColors colors) {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: colors.surf,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: colors.edge2),
-      ),
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return FutureBuilder<List<DefectComment>>(
+      future: _commentsFuture,
+      builder: (context, snapshot) {
+        final List<DefectComment> comments = snapshot.data ?? const <DefectComment>[];
+        final countStr = snapshot.connectionState == ConnectionState.waiting ? "..." : "${comments.length}";
+
+        return Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: colors.surf,
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: colors.edge2),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                "Что пишут водители",
-                style: TextStyle(
-                  fontFamily: AppTheme.fontUi,
-                  fontSize: 14.5,
-                  fontWeight: FontWeight.w700,
-                  color: colors.ink,
-                  letterSpacing: -0.3,
-                ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    "Что пишут водители",
+                    style: TextStyle(
+                      fontFamily: AppTheme.fontUi,
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w700,
+                      color: colors.ink,
+                      letterSpacing: -0.3,
+                    ),
+                  ),
+                  Text(
+                    countStr,
+                    style: TextStyle(
+                      fontFamily: AppTheme.fontMono,
+                      fontSize: 12,
+                      color: colors.ink3,
+                    ),
+                  ),
+                ],
               ),
-              Text(
-                "24",
-                style: TextStyle(
-                  fontFamily: AppTheme.fontMono,
-                  fontSize: 12,
-                  color: colors.ink3,
+              const SizedBox(height: 14),
+              if (comments.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Text(
+                    "Пока нет комментариев. Расскажите другим водителям о состоянии полотна.",
+                    style: TextStyle(
+                      fontFamily: AppTheme.fontUi,
+                      fontSize: 13,
+                      color: colors.ink3,
+                    ),
+                  ),
+                )
+              else
+                ...comments.map((DefectComment c) {
+                  final initial = c.authorName.isNotEmpty ? c.authorName[0].toUpperCase() : "В";
+                  final timeStr = _formatRelativeTime(c.createdAt);
+
+                  return Column(
+                    children: [
+                      _buildCommentRow(colors, initial, c.authorName, timeStr, c.text),
+                      if (c != comments.last) Divider(color: colors.edge2, height: 24),
+                    ],
+                  );
+                }),
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(46),
+                  side: BorderSide(color: colors.edge),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+                onPressed: () => _showAddCommentDialog(colors),
+                icon: Icon(Icons.add_comment_outlined, size: 16, color: colors.markInk),
+                label: Text(
+                  "Написать комментарий",
+                  style: TextStyle(
+                    fontFamily: AppTheme.fontUi,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                    color: colors.ink,
+                  ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 14),
-          _buildCommentRow(
-            colors,
-            "МК",
-            "Михаил К.",
-            "2 ч",
-            "После дождя стала глубже, объезжать слева.",
-          ),
-          Divider(color: colors.edge2, height: 24),
-          _buildCommentRow(
-            colors,
-            "ОП",
-            "Ольга П.",
-            "5 ч",
-            "Проезжала утром — правое колесо ушло целиком.",
-          ),
-        ],
-      ),
+        );
+      },
     );
+  }
+
+  String _formatRelativeTime(DateTime dt) {
+    final diff = DateTime.now().difference(dt);
+    if (diff.inMinutes < 60) {
+      return "${diff.inMinutes.clamp(1, 60)} мин назад";
+    } else if (diff.inHours < 24) {
+      return "${diff.inHours} ч назад";
+    }
+    return "${diff.inDays} дн назад";
   }
 
   Widget _buildCommentRow(PolotnoColors colors, String initials, String name, String time, String text) {
@@ -617,37 +858,8 @@ class ImpactSpikePainter extends CustomPainter {
     }
     canvas.drawPath(path, linePaint);
 
-    // Точка пика
     final dotPaint = Paint()..color = lineColor;
     canvas.drawCircle(Offset(size.width * 0.49, 8), 3.5, dotPaint);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-class MiniRoadPainter extends CustomPainter {
-  final Color roadColor;
-
-  MiniRoadPainter({required this.roadColor});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final roadPaint = Paint()
-      ..color = roadColor
-      ..strokeWidth = 22
-      ..strokeCap = StrokeCap.round;
-
-    canvas.drawLine(
-      Offset(size.width / 2, -10),
-      Offset(size.width / 2, size.height + 10),
-      roadPaint,
-    );
-    canvas.drawLine(
-      Offset(-10, size.height / 2),
-      Offset(size.width + 10, size.height / 2),
-      roadPaint..strokeWidth = 16,
-    );
   }
 
   @override

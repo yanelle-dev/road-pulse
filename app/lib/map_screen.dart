@@ -1,12 +1,15 @@
+import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:latlong2/latlong.dart';
+import 'package:latlong2/latlong.dart' hide Path;
 
 import 'api_service.dart';
 import 'app_theme.dart';
+import 'constants.dart';
 import 'pothole_details_screen.dart';
 import 'widgets/road_ribbon.dart';
 
@@ -23,12 +26,46 @@ class _MapScreenState extends State<MapScreen> {
   final MapController _mapController = MapController();
   List<dynamic> _bumps = [];
   LatLng? _myLocation;
+  double _currentSpeedKmh = 0.0;
+  bool _isServiceRunning = false;
+  StreamSubscription<Position>? _positionStream;
 
   @override
   void initState() {
     super.initState();
     _loadBumps();
     _locateUser();
+    _checkServiceStatus();
+    _initSpeedListener();
+  }
+
+  @override
+  void dispose() {
+    _positionStream?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _checkServiceStatus() async {
+    final running = await FlutterForegroundTask.isRunningService;
+    if (mounted) {
+      setState(() => _isServiceRunning = running);
+    }
+  }
+
+  void _initSpeedListener() {
+    _positionStream = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 2,
+      ),
+    ).listen((pos) {
+      if (mounted) {
+        setState(() {
+          _myLocation = LatLng(pos.latitude, pos.longitude);
+          _currentSpeedKmh = (pos.speed * 3.6).clamp(0.0, 999.0);
+        });
+      }
+    });
   }
 
   Future<void> _locateUser() async {
@@ -41,6 +78,7 @@ class _MapScreenState extends State<MapScreen> {
       if (mounted) {
         setState(() {
           _myLocation = LatLng(pos.latitude, pos.longitude);
+          _currentSpeedKmh = (pos.speed * 3.6).clamp(0.0, 999.0);
         });
         _mapController.move(_myLocation!, 15.0);
       }
@@ -62,6 +100,50 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  List<Polyline> _buildPolylines(PolotnoColors colors) {
+    final List<Polyline> polylines = [];
+
+    for (final b in _bumps) {
+      if (b['defect_type'] != 'rough_road') continue;
+
+      final rawCoords = b['coordinates'];
+      if (rawCoords is! List || rawCoords.length < 2) continue;
+
+      final List<LatLng> points = [];
+      for (final pt in rawCoords) {
+        if (pt is List && pt.length >= 2) {
+          final lat = (pt[0] as num).toDouble();
+          final lon = (pt[1] as num).toDouble();
+          points.add(LatLng(lat, lon));
+        }
+      }
+
+      if (points.length < 2) continue;
+
+      final double force = ((b['max_force'] ?? 0.0) as num).toDouble();
+      final bool isConfirmed = b['is_confirmed'] ?? false;
+
+      Color lineColor = colors.s1;
+      if (force > kSeverityHard) {
+        lineColor = colors.s3;
+      } else if (force > kSeverityMedium) {
+        lineColor = colors.s2;
+      }
+
+      polylines.add(
+        Polyline(
+          points: points,
+          strokeWidth: isConfirmed ? 5.0 : 3.5,
+          color: isConfirmed ? lineColor : lineColor.withValues(alpha: 0.65),
+          borderColor: colors.asphalt,
+          borderStrokeWidth: isConfirmed ? 1.5 : 0.0,
+        ),
+      );
+    }
+
+    return polylines;
+  }
+
   List<CircleMarker> _buildCircles(PolotnoColors colors) {
     final List<CircleMarker> circles = [];
 
@@ -69,21 +151,27 @@ class _MapScreenState extends State<MapScreen> {
       final bool isConfirmed = b['is_confirmed'] ?? false;
       if (!isConfirmed) continue;
 
+      // Участки с геометрией линий уже отрисованы в PolylineLayer
+      if (b['defect_type'] == 'rough_road' && (b['coordinates'] as List?)?.isNotEmpty == true) {
+        continue;
+      }
+
       final double force = (b['max_force'] ?? 0.0).toDouble();
-      final LatLng point = LatLng(b['lat'], b['lon']);
+      final double lat = (b['lat'] ?? b['latitude'] ?? 0.0).toDouble();
+      final double lon = (b['lon'] ?? b['longitude'] ?? 0.0).toDouble();
+      final LatLng point = LatLng(lat, lon);
 
       Color bumpColor = colors.s1;
       double radius = 10.0;
 
-      if (force > 30) {
+      if (force > kSeverityHard) {
         bumpColor = colors.s3;
         radius = 16.0;
-      } else if (force > 20) {
+      } else if (force > kSeverityMedium) {
         bumpColor = colors.s2;
         radius = 12.0;
       }
 
-      // Внешний полупрозрачный ореол
       circles.add(
         CircleMarker(
           point: point,
@@ -94,7 +182,6 @@ class _MapScreenState extends State<MapScreen> {
         ),
       );
 
-      // Ядро дефекта
       circles.add(
         CircleMarker(
           point: point,
@@ -117,7 +204,14 @@ class _MapScreenState extends State<MapScreen> {
       final bool isConfirmed = b['is_confirmed'] ?? false;
       if (isConfirmed) continue;
 
-      final LatLng point = LatLng(b['lat'], b['lon']);
+      if (b['defect_type'] == 'rough_road' && (b['coordinates'] as List?)?.isNotEmpty == true) {
+        continue;
+      }
+
+      final double lat = (b['lat'] ?? b['latitude'] ?? 0.0).toDouble();
+      final double lon = (b['lon'] ?? b['longitude'] ?? 0.0).toDouble();
+      final LatLng point = LatLng(lat, lon);
+
       unconfirmedMarkers.add(
         Marker(
           point: point,
@@ -145,7 +239,6 @@ class _MapScreenState extends State<MapScreen> {
       backgroundColor: colors.voidBg,
       body: Stack(
         children: [
-          // 1. Карта OpenStreetMap (без API-ключей, с darkModeTileBuilder в ночной теме)
           FlutterMap(
             mapController: _mapController,
             options: const MapOptions(
@@ -158,6 +251,7 @@ class _MapScreenState extends State<MapScreen> {
                 userAgentPackageName: 'com.roadpulse.app',
                 tileBuilder: isDark ? darkModeTileBuilder : null,
               ),
+              PolylineLayer(polylines: _buildPolylines(colors)),
               CircleLayer(circles: _buildCircles(colors)),
               MarkerLayer(
                 markers: [
@@ -173,19 +267,13 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ],
           ),
-
-          // 2. Верхняя статус-капсула записи
           Positioned(top: 54, left: 16, child: _buildRecordCapsule(colors)),
-
-          // 3. Строка поиска «Куда едем?»
           Positioned(
             top: 106,
             left: 16,
             right: 16,
             child: _buildSearchBar(colors),
           ),
-
-          // 4. Плавающие кнопки управления справа
           Positioned(
             top: 174,
             right: 16,
@@ -196,6 +284,7 @@ class _MapScreenState extends State<MapScreen> {
               onTap: () {
                 _loadBumps();
                 _locateUser();
+                _checkServiceStatus();
               },
             ),
           ),
@@ -209,8 +298,6 @@ class _MapScreenState extends State<MapScreen> {
               onTap: () {},
             ),
           ),
-
-          // 5. Выдвижная шторка
           _buildDraggableSheet(colors),
         ],
       ),
@@ -235,6 +322,9 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _buildRecordCapsule(PolotnoColors colors) {
+    final speed = _currentSpeedKmh.round();
+    final isActive = _isServiceRunning;
+
     return GestureDetector(
       onTap: () => widget.onNavigateToTab?.call(2),
       child: ClipRRect(
@@ -255,13 +345,13 @@ class _MapScreenState extends State<MapScreen> {
                   width: 8,
                   height: 8,
                   decoration: BoxDecoration(
-                    color: colors.s3,
+                    color: isActive ? colors.s1 : colors.ink3,
                     shape: BoxShape.circle,
                   ),
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  "ЗАПИСЬ",
+                  isActive ? "ЗАПИСЬ" : "ПАУЗА",
                   style: TextStyle(
                     fontFamily: AppTheme.fontUi,
                     fontSize: 12,
@@ -272,7 +362,7 @@ class _MapScreenState extends State<MapScreen> {
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  "58 км/ч",
+                  "$speed км/ч",
                   style: TextStyle(
                     fontFamily: AppTheme.fontMono,
                     fontSize: 11.5,
@@ -350,6 +440,33 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _buildDraggableSheet(PolotnoColors colors) {
+    final int hardCount = _bumps.where((b) {
+      final f = (b['max_force'] ?? 0.0).toDouble();
+      return f > kSeverityHard;
+    }).length;
+
+    // Сортируем реальные дефекты по расстоянию от текущей позиции
+    final List<Map<String, dynamic>> nearestBumps = [];
+    if (_myLocation != null) {
+      for (final b in _bumps) {
+        final lat = (b['lat'] ?? b['latitude'] ?? 0.0).toDouble();
+        final lon = (b['lon'] ?? b['longitude'] ?? 0.0).toDouble();
+        final dist = Geolocator.distanceBetween(
+          _myLocation!.latitude,
+          _myLocation!.longitude,
+          lat,
+          lon,
+        );
+        nearestBumps.add({
+          ...b,
+          'calc_distance_m': dist,
+        });
+      }
+      nearestBumps.sort((a, b) => (a['calc_distance_m'] as double).compareTo(b['calc_distance_m'] as double));
+    }
+
+    final displayDefects = nearestBumps.take(3).toList();
+
     return DraggableScrollableSheet(
       initialChildSize: 0.38,
       minChildSize: 0.22,
@@ -390,7 +507,7 @@ class _MapScreenState extends State<MapScreen> {
                 textBaseline: TextBaseline.alphabetic,
                 children: [
                   Text(
-                    "Впереди 4,2 км",
+                    "Карта дефектов",
                     style: TextStyle(
                       fontFamily: AppTheme.fontDisplay,
                       fontSize: 22,
@@ -400,7 +517,7 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
                   Text(
-                    "ДО СОКОЛА",
+                    "ОБЗОР",
                     style: TextStyle(
                       fontFamily: AppTheme.fontMono,
                       fontSize: 10,
@@ -414,51 +531,30 @@ class _MapScreenState extends State<MapScreen> {
               const SizedBox(height: 14),
               RoadRibbon(
                 height: 14,
-                currentPosition: 0.19,
+                currentPosition: 0.2,
                 segments: [
-                  RibbonSegment(flex: 0.22, color: colors.s1),
-                  RibbonSegment(flex: 0.13, color: colors.s2),
-                  RibbonSegment(flex: 0.09, color: colors.s3),
-                  RibbonSegment(flex: 0.26, color: colors.s1),
-                  RibbonSegment(flex: 0.11, color: colors.s3),
-                  RibbonSegment(flex: 0.19, color: colors.s2),
+                  RibbonSegment(flex: 0.65, color: colors.s1),
+                  RibbonSegment(flex: 0.20, color: colors.s2),
+                  RibbonSegment(flex: 0.15, color: colors.s3),
                 ],
               ),
-              const SizedBox(height: 7),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    "ВЫ ЗДЕСЬ",
-                    style: TextStyle(
-                      fontFamily: AppTheme.fontMono,
-                      fontSize: 9.5,
-                      color: colors.ink3,
-                      letterSpacing: 1.2,
-                    ),
-                  ),
-                  Text(
-                    "ЧЕРЕЗ 4,2 КМ",
-                    style: TextStyle(
-                      fontFamily: AppTheme.fontMono,
-                      fontSize: 9.5,
-                      color: colors.ink3,
-                      letterSpacing: 1.2,
-                    ),
-                  ),
-                ],
+              const SizedBox(height: 16),
+              FutureBuilder<UserStats>(
+                future: ApiService.getUserStats(),
+                builder: (context, snap) {
+                  final stats = snap.data ?? UserStats.empty();
+                  return Row(
+                    children: [
+                      _buildStatPill(colors, "$hardCount", "ЖЁСТКИХ НА КАРТЕ", colors.s3),
+                      const SizedBox(width: 8),
+                      _buildStatPill(colors, stats.totalKm.toStringAsFixed(1), "КМ ЗАПИСАНО", colors.ink),
+                      const SizedBox(width: 8),
+                      _buildStatPill(colors, "${stats.rating}", "ОЧКОВ", colors.markInk),
+                    ],
+                  );
+                },
               ),
-              const SizedBox(height: 20),
-              Row(
-                children: [
-                  _buildStatPill(colors, "7", "ЖЁСТКИХ", colors.s3),
-                  const SizedBox(width: 8),
-                  _buildStatPill(colors, "3,2", "КМ ЗАПИСАНО", colors.ink),
-                  const SizedBox(width: 8),
-                  _buildStatPill(colors, "+120", "ОЧКОВ", colors.markInk),
-                ],
-              ),
-              const SizedBox(height: 26),
+              const SizedBox(height: 24),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -475,7 +571,7 @@ class _MapScreenState extends State<MapScreen> {
                   GestureDetector(
                     onTap: () => widget.onNavigateToTab?.call(1),
                     child: Text(
-                      "Все 24",
+                      "Все ${_bumps.length}",
                       style: TextStyle(
                         fontFamily: AppTheme.fontUi,
                         fontSize: 13,
@@ -487,26 +583,44 @@ class _MapScreenState extends State<MapScreen> {
                 ],
               ),
               const SizedBox(height: 12),
-              _buildDefectRow(
-                colors: colors,
-                title: "Ленинградский пр-т, 78",
-                coord: "55.75121, 37.61843",
-                time: "09:12 · 1,2 км",
-                levelText: "ЖЁСТКО",
-                levelColor: colors.s3,
-                levelBg: colors.s3Soft,
-                confirms: 12,
-              ),
-              _buildDefectRow(
-                colors: colors,
-                title: "Ул. Красина, 14",
-                coord: "55.76904, 37.58311",
-                time: "08:47 · 2,6 км",
-                levelText: "ЗАМЕТНО",
-                levelColor: colors.s2,
-                levelBg: colors.s2Soft,
-                confirms: 7,
-              ),
+              if (displayDefects.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 24),
+                  child: Center(
+                    child: Text(
+                      _bumps.isEmpty ? "Данные загружаются..." : "Поблизости дефектов не обнаружено",
+                      style: TextStyle(
+                        fontFamily: AppTheme.fontUi,
+                        fontSize: 13,
+                        color: colors.ink3,
+                      ),
+                    ),
+                  ),
+                )
+              else
+                ...displayDefects.map((bump) {
+                  final lat = (bump['lat'] ?? bump['latitude'] ?? 0.0).toDouble();
+                  final lon = (bump['lon'] ?? bump['longitude'] ?? 0.0).toDouble();
+                  final force = (bump['max_force'] ?? 0.0).toDouble();
+                  final distM = (bump['calc_distance_m'] as double?) ?? 0.0;
+                  final distStr = distM >= 1000 ? "${(distM / 1000).toStringAsFixed(1)} км" : "${distM.round()} м";
+                  final confirms = bump['total_hits'] ?? bump['unique_users'] ?? 1;
+
+                  final isHard = force > kSeverityHard;
+                  final isMed = force > kSeverityMedium;
+
+                  return _buildDefectRow(
+                    colors: colors,
+                    title: bump['defect_type'] == 'rough_road' ? "Неровная дорога" : "Дефект полотна",
+                    coord: "${lat.toStringAsFixed(4)}, ${lon.toStringAsFixed(4)}",
+                    time: distStr,
+                    levelText: isHard ? "ЖЁСТКО" : (isMed ? "ЗАМЕТНО" : "РОВНО"),
+                    levelColor: isHard ? colors.s3 : (isMed ? colors.s2 : colors.s1),
+                    levelBg: isHard ? colors.s3Soft : (isMed ? colors.s2Soft : colors.s1Soft),
+                    confirms: confirms,
+                    rawDefect: bump,
+                  );
+                }),
               const SizedBox(height: 16),
               OutlinedButton(
                 style: OutlinedButton.styleFrom(
@@ -556,7 +670,7 @@ class _MapScreenState extends State<MapScreen> {
               val,
               style: TextStyle(
                 fontFamily: AppTheme.fontDisplay,
-                fontSize: 24,
+                fontSize: 22,
                 fontWeight: FontWeight.w700,
                 color: valColor,
                 letterSpacing: -0.8,
@@ -566,11 +680,13 @@ class _MapScreenState extends State<MapScreen> {
             const SizedBox(height: 6),
             Text(
               label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontFamily: AppTheme.fontMono,
-                fontSize: 9,
+                fontSize: 8.5,
                 fontWeight: FontWeight.w500,
-                letterSpacing: 1.1,
+                letterSpacing: 0.8,
                 color: colors.ink3,
               ),
             ),
@@ -589,12 +705,15 @@ class _MapScreenState extends State<MapScreen> {
     required Color levelColor,
     required Color levelBg,
     required int confirms,
+    Map<String, dynamic>? rawDefect,
   }) {
     return InkWell(
       onTap: () {
         Navigator.push(
           context,
-          MaterialPageRoute(builder: (_) => const PotholeDetailsScreen()),
+          MaterialPageRoute(
+            builder: (_) => PotholeDetailsScreen(defect: rawDefect),
+          ),
         );
       },
       child: Container(
@@ -605,8 +724,8 @@ class _MapScreenState extends State<MapScreen> {
         child: Row(
           children: [
             Container(
-              width: 58,
-              height: 58,
+              width: 50,
+              height: 50,
               decoration: BoxDecoration(
                 color: colors.surf2,
                 borderRadius: BorderRadius.circular(14),
@@ -614,7 +733,7 @@ class _MapScreenState extends State<MapScreen> {
               child: Icon(
                 Icons.broken_image_outlined,
                 color: colors.ink3,
-                size: 24,
+                size: 22,
               ),
             ),
             const SizedBox(width: 12),
@@ -680,8 +799,9 @@ class _MapScreenState extends State<MapScreen> {
                       Text(
                         time,
                         style: TextStyle(
-                          fontFamily: AppTheme.fontUi,
+                          fontFamily: AppTheme.fontMono,
                           fontSize: 11,
+                          fontWeight: FontWeight.w600,
                           color: colors.ink3,
                         ),
                       ),

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -104,48 +105,112 @@ func (s *TelemetryService) SaveTelemetry(ctx context.Context, payload *models.Te
 	}, nil
 }
 
+func parseGeoJSONCoordinates(raw string) [][]float64 {
+	if raw == "" {
+		return nil
+	}
+	var g struct {
+		Type        string          `json:"type"`
+		Coordinates json.RawMessage `json:"coordinates"`
+	}
+	if err := json.Unmarshal([]byte(raw), &g); err != nil {
+		return nil
+	}
+
+	switch g.Type {
+	case "LineString":
+		var pts [][]float64
+		if err := json.Unmarshal(g.Coordinates, &pts); err == nil {
+			coords := make([][]float64, 0, len(pts))
+			for _, pt := range pts {
+				if len(pt) >= 2 {
+					coords = append(coords, []float64{pt[1], pt[0]}) // перевод [lon, lat] в [lat, lon]
+				}
+			}
+			return coords
+		}
+	case "MultiLineString":
+		var lines [][][]float64
+		if err := json.Unmarshal(g.Coordinates, &lines); err == nil {
+			coords := make([][]float64, 0)
+			for _, line := range lines {
+				for _, pt := range line {
+					if len(pt) >= 2 {
+						coords = append(coords, []float64{pt[1], pt[0]})
+					}
+				}
+			}
+			return coords
+		}
+	}
+	return nil
+}
+
 func (s *TelemetryService) GetClusters(ctx context.Context) ([]models.TelemetryCluster, error) {
+	// Стабильный cluster_id через MIN(id) первой точки кластера
 	potholeSQL := `
 		WITH points AS (
-			SELECT user_id, location, bump_force, infrastructure_type
+			SELECT id, user_id, location, bump_force, infrastructure_type, timestamp
 			FROM telemetry
 			WHERE defect_type = 'pothole'
 		),
 		clustered AS (
 			SELECT
-				ST_ClusterDBSCAN(location, $1, 1) OVER () AS cluster_id,
+				ST_ClusterDBSCAN(location, $1, 1) OVER () AS c_id,
+				id,
 				user_id,
 				location,
 				bump_force,
-				infrastructure_type
+				infrastructure_type,
+				timestamp
 			FROM points
 		)
 		SELECT
-			cluster_id,
+			MIN(id) AS cluster_id,
 			ST_Y(ST_Centroid(ST_Collect(location))) AS lat,
 			ST_X(ST_Centroid(ST_Collect(location))) AS lon,
 			MAX(bump_force) AS max_force,
 			COUNT(DISTINCT user_id)::int AS unique_users,
 			COUNT(*)::int AS total_hits,
 			'pothole' AS defect_type,
-			MAX(infrastructure_type) AS infrastructure_type
+			MAX(infrastructure_type) AS infrastructure_type,
+			COALESCE(MAX(timestamp), NOW()) AS created_at
 		FROM clustered
-		WHERE cluster_id IS NOT NULL
-		GROUP BY cluster_id;
+		WHERE c_id IS NOT NULL
+		GROUP BY c_id;
 	`
 
 	roughSQL := `
+		WITH points AS (
+			SELECT id, user_id, location, bump_force, infrastructure_type, timestamp
+			FROM telemetry
+			WHERE defect_type = 'rough_road'
+		),
+		clustered AS (
+			SELECT
+				ST_ClusterDBSCAN(location, $1, 1) OVER () AS c_id,
+				id,
+				user_id,
+				location,
+				bump_force,
+				infrastructure_type,
+				timestamp
+			FROM points
+		)
 		SELECT
-			id AS cluster_id,
-			ST_Y(ST_Centroid(location)) AS lat,
-			ST_X(ST_Centroid(location)) AS lon,
-			bump_force AS max_force,
-			1 AS unique_users,
-			1 AS total_hits,
-			defect_type,
-			infrastructure_type
-		FROM telemetry
-		WHERE defect_type = 'rough_road';
+			(MIN(id) + 100000000)::bigint AS cluster_id,
+			ST_Y(ST_Centroid(ST_Collect(location))) AS lat,
+			ST_X(ST_Centroid(ST_Collect(location))) AS lon,
+			MAX(bump_force) AS max_force,
+			COUNT(DISTINCT user_id)::int AS unique_users,
+			COUNT(*)::int AS total_hits,
+			'rough_road' AS defect_type,
+			MAX(infrastructure_type) AS infrastructure_type,
+			COALESCE(MAX(timestamp), NOW()) AS created_at,
+			COALESCE(ST_AsGeoJSON(ST_Collect(location)), '') AS geojson
+		FROM clustered
+		WHERE c_id IS NOT NULL
+		GROUP BY c_id;
 	`
 
 	results := make([]models.TelemetryCluster, 0)
@@ -168,6 +233,7 @@ func (s *TelemetryService) GetClusters(ctx context.Context) ([]models.TelemetryC
 			&item.TotalHits,
 			&item.DefectType,
 			&item.InfrastructureType,
+			&item.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -175,16 +241,16 @@ func (s *TelemetryService) GetClusters(ctx context.Context) ([]models.TelemetryC
 		results = append(results, item)
 	}
 
-	// 2. Чтение участков rough_road
-	roughRows, err := s.pool.Query(ctx, roughSQL)
+	// 2. Чтение кластеризованных участков rough_road со стабильным ID
+	roughRows, err := s.pool.Query(ctx, roughSQL, ClusterEpsDeg)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка запроса rough_road: %w", err)
 	}
 	defer roughRows.Close()
 
-	const offset = 1000000
 	for roughRows.Next() {
 		var item models.TelemetryCluster
+		var geojsonStr string
 		if err := roughRows.Scan(
 			&item.ClusterID,
 			&item.Lat,
@@ -194,18 +260,19 @@ func (s *TelemetryService) GetClusters(ctx context.Context) ([]models.TelemetryC
 			&item.TotalHits,
 			&item.DefectType,
 			&item.InfrastructureType,
+			&item.CreatedAt,
+			&geojsonStr,
 		); err != nil {
 			return nil, err
 		}
-		item.ClusterID += offset
-		item.IsConfirmed = false
+		item.IsConfirmed = (item.UniqueUsers >= 2 || item.TotalHits >= 3)
+		item.Coordinates = parseGeoJSONCoordinates(geojsonStr)
 		results = append(results, item)
 	}
 
 	return results, nil
 }
 
-// RecordDistance атомарно сохраняет пройденную дистанцию в БД
 func (s *TelemetryService) RecordDistance(ctx context.Context, userID string, meters float64) (*models.DistanceResponse, error) {
 	if meters <= 0 {
 		return &models.DistanceResponse{
@@ -233,4 +300,62 @@ func (s *TelemetryService) RecordDistance(ctx context.Context, userID string, me
 		AddedMeters:         meters,
 		TotalDistanceMeters: total,
 	}, nil
+}
+
+// AddComment сохраняет комментарий к стабильному ID дефекта
+func (s *TelemetryService) AddComment(ctx context.Context, clusterID int64, userID, authorName, text string) (*models.DefectComment, error) {
+	cleanText := strings.TrimSpace(text)
+	if cleanText == "" {
+		return nil, fmt.Errorf("текст комментария не может быть пустым")
+	}
+
+	// Защита: если имя автора не передано, извлекаем реальное имя пользователя из таблицы users
+	if authorName == "" {
+		var realName string
+		_ = s.pool.QueryRow(ctx, `SELECT name FROM users WHERE id = $1;`, userID).Scan(&realName)
+		if strings.TrimSpace(realName) != "" {
+			authorName = strings.TrimSpace(realName)
+		} else {
+			authorName = "Водитель"
+		}
+	}
+
+	query := `
+		INSERT INTO defect_comments (cluster_id, user_id, author_name, text, created_at)
+		VALUES ($1, $2, $3, $4, NOW())
+		RETURNING id, cluster_id, user_id, author_name, text, created_at;
+	`
+	var c models.DefectComment
+	err := s.pool.QueryRow(ctx, query, clusterID, userID, authorName, cleanText).Scan(
+		&c.ID, &c.ClusterID, &c.UserID, &c.AuthorName, &c.Text, &c.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка добавления комментария: %w", err)
+	}
+	return &c, nil
+}
+
+// GetComments возвращает список комментариев к дефекту
+func (s *TelemetryService) GetComments(ctx context.Context, clusterID int64) ([]models.DefectComment, error) {
+	query := `
+		SELECT id, cluster_id, user_id, author_name, text, created_at
+		FROM defect_comments
+		WHERE cluster_id = $1
+		ORDER BY created_at DESC;
+	`
+	rows, err := s.pool.Query(ctx, query, clusterID)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения комментариев: %w", err)
+	}
+	defer rows.Close()
+
+	comments := make([]models.DefectComment, 0)
+	for rows.Next() {
+		var c models.DefectComment
+		if err := rows.Scan(&c.ID, &c.ClusterID, &c.UserID, &c.AuthorName, &c.Text, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		comments = append(comments, c)
+	}
+	return comments, nil
 }

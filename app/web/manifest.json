@@ -1,11 +1,11 @@
 {
-    "name": "easyride_app",
-    "short_name": "easyride_app",
+    "name": "Дорожный пульс",
+    "short_name": "RoadPulse",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "Платформа дорожного мониторинга «Дорожный пульс».",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

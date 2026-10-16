@@ -125,3 +125,62 @@ func (h *AuthHandler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(user)
 }
+
+func (h *AuthHandler) DeleteMe(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	userID, ok := r.Context().Value(ContextUserIDKey).(string)
+	if !ok || userID == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Требуется авторизация"})
+		return
+	}
+
+	if err := h.service.DeleteAccount(r.Context(), userID); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "account_deleted"})
+}
+
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var payload models.RefreshTokenPayload
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+
+	if payload.RefreshToken != "" {
+		_ = h.service.Logout(r.Context(), payload.RefreshToken)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "logged_out"})
+}
+
+func (h *AuthHandler) SyncStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	userID, ok := r.Context().Value(ContextUserIDKey).(string)
+	if !ok || userID == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Требуется авторизация"})
+		return
+	}
+
+	var payload models.SyncStatsPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Некорректный JSON"})
+		return
+	}
+
+	user, err := h.service.SyncStats(r.Context(), userID, payload.StreakDays, payload.UnlockedAchievements)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(user)
+}

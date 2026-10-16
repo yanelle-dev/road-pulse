@@ -1,10 +1,11 @@
 import 'dart:convert';
-
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-
 import 'achievement_service.dart';
+import 'calculations.dart';
+import 'constants.dart';
+import 'fresh_prefs.dart';
 
 enum LogKind { ok, hit, warn }
 
@@ -78,6 +79,69 @@ class UserActivityData {
   }
 }
 
+/// Данные завершённой поездки пользователя
+class TripData {
+  final int id;
+  final DateTime startedAt;
+  final DateTime? endedAt;
+  final double distanceMeters;
+  final int defectsCount;
+  final double smoothRatio;
+  final double mediumRatio;
+  final double hardRatio;
+
+  const TripData({
+    required this.id,
+    required this.startedAt,
+    this.endedAt,
+    required this.distanceMeters,
+    required this.defectsCount,
+    required this.smoothRatio,
+    required this.mediumRatio,
+    required this.hardRatio,
+  });
+
+  factory TripData.fromJson(Map<String, dynamic> json) {
+    return TripData(
+      id: (json['id'] as num).toInt(),
+      startedAt: DateTime.tryParse(json['started_at']?.toString() ?? '')?.toLocal() ?? DateTime.now(),
+      endedAt: json['ended_at'] != null ? DateTime.tryParse(json['ended_at'].toString())?.toLocal() : null,
+      distanceMeters: ((json['distance_meters'] ?? 0.0) as num).toDouble(),
+      defectsCount: ((json['defects_count'] ?? 0) as num).toInt(),
+      smoothRatio: ((json['smooth_ratio'] ?? 1.0) as num).toDouble(),
+      mediumRatio: ((json['medium_ratio'] ?? 0.0) as num).toDouble(),
+      hardRatio: ((json['hard_ratio'] ?? 0.0) as num).toDouble(),
+    );
+  }
+}
+
+/// Комментарий водителя к дефекту
+class DefectComment {
+  final int id;
+  final int clusterId;
+  final String authorName;
+  final String text;
+  final DateTime createdAt;
+
+  const DefectComment({
+    required this.id,
+    required this.clusterId,
+    required this.authorName,
+    required this.text,
+    required this.createdAt,
+  });
+
+  factory DefectComment.fromJson(Map<String, dynamic> json) {
+    return DefectComment(
+      id: (json['id'] as num).toInt(),
+      clusterId: (json['cluster_id'] as num).toInt(),
+      authorName: json['author_name']?.toString() ?? 'Водитель',
+      text: json['text']?.toString() ?? '',
+      createdAt: DateTime.tryParse(json['created_at']?.toString() ?? '')?.toLocal() ?? DateTime.now(),
+    );
+  }
+}
+
 /// Пользовательская статистика для экрана профиля
 class UserStats {
   final double totalKm;
@@ -86,6 +150,7 @@ class UserStats {
   final int savedSuspensions;
   final int unlockedAchievements;
   final int streakDays;
+  final int communityPercentile;
 
   const UserStats({
     required this.totalKm,
@@ -94,6 +159,7 @@ class UserStats {
     required this.savedSuspensions,
     required this.unlockedAchievements,
     required this.streakDays,
+    this.communityPercentile = 0,
   });
 
   factory UserStats.empty() {
@@ -104,12 +170,16 @@ class UserStats {
       savedSuspensions: 0,
       unlockedAchievements: 0,
       streakDays: 0,
+      communityPercentile: 0,
     );
   }
 }
 
 class ApiService {
-  static const String baseUrl = 'http://31.77.105.240:8001/api/v1';
+  static const String baseUrl = String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: 'http://31.77.105.240:8001/api/v1',
+  );
   static const String apiUrl = '$baseUrl/telemetry';
 
   static ValueNotifier<List<LogEntry>> logs = ValueNotifier(const []);
@@ -141,7 +211,7 @@ class ApiService {
   // --- МЕТОДЫ УЧЁТА ДЕФЕКТОВ И РАСЧЁТА РЕЙТИНГА ---
 
   static Future<int> getDefectsCount() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await freshPrefs();
     return prefs.getInt(_keyDefectsCount) ?? 0;
   }
 
@@ -153,25 +223,66 @@ class ApiService {
     await AchievementService.syncDefectsProgress(next);
   }
 
-  /// Получение сводной статистики и расчёт рейтинга по регламентной формуле
+/// Получение сводной статистики: сервер как единственный источник правды
   static Future<UserStats> getUserStats() async {
     try {
-      final totalKm = await AchievementService.getTotalDistanceKm();
-      final totalDefects = await getDefectsCount();
-
+      final token = await getAccessToken();
       final activity = await getActivityData();
       final streakDays = activity.streakDays;
 
       final achievements = await AchievementService.getAchievements();
       final unlockedAchievements = achievements.where((a) => a.isUnlocked).length;
 
-      // Формула: (Км * 10) + (Дефекты * 50) + (Награды * 100) + (Серия * 20)
-      final rating = (totalKm * 10).round() +
-          (totalDefects * 50) +
-          (unlockedAchievements * 100) +
-          (streakDays * 20);
+      double totalKm = 0.0;
+      int totalDefects = 0;
+      int rating = 0;
+      int savedSuspensions = 0;
+      int communityPercentile = 0;
+      bool serverDataLoaded = false;
 
-      final savedSuspensions = (totalDefects * 0.15).ceil();
+      if (token != null && token.isNotEmpty) {
+        try {
+          // Один атомарный запрос: передаёт серию/награды и сразу возвращает эталонную статистику
+          final res = await http.post(
+            Uri.parse('$baseUrl/auth/sync-stats'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $token',
+            },
+            body: jsonEncode({
+              'streak_days': streakDays,
+              'unlocked_achievements': unlockedAchievements,
+            }),
+          );
+
+          if (res.statusCode == 200) {
+            final data = jsonDecode(res.body);
+            final serverMeters = (data['total_distance_meters'] ?? 0.0).toDouble();
+            final prefs = await freshPrefs();
+            final pendingMeters = prefs.getDouble(kKeyPendingDistanceMeters) ?? 0.0;
+
+            totalKm = (serverMeters + pendingMeters) / 1000.0;
+            totalDefects = (data['total_defects'] ?? 0) as int;
+            rating = (data['rating'] ?? 0) as int;
+            savedSuspensions = (data['saved_suspensions'] ?? 0) as int;
+            communityPercentile = ((data['community_percentile'] ?? 0) as num).toInt();
+            serverDataLoaded = true;
+          }
+        } catch (_) {}
+      }
+
+      // Оффлайн-фолбэк
+      if (!serverDataLoaded) {
+        totalKm = await AchievementService.getTotalDistanceKm();
+        totalDefects = await getDefectsCount();
+        rating = ratingFor(
+          totalKm,
+          totalDefects,
+          unlockedAchievements,
+          streakDays,
+        );
+        savedSuspensions = (totalDefects * 0.15).ceil();
+      }
 
       return UserStats(
         totalKm: totalKm,
@@ -180,6 +291,7 @@ class ApiService {
         savedSuspensions: savedSuspensions,
         unlockedAchievements: unlockedAchievements,
         streakDays: streakDays,
+        communityPercentile: communityPercentile,
       );
     } catch (e) {
       debugPrint("Ошибка расчёта статистики: $e");
@@ -187,7 +299,127 @@ class ApiService {
     }
   }
 
-  // --- МЕТОДЫ АКТИВНОСТИ ПОЛЬЗОВАТЕЛЯ (ЛОКАЛЬНО) ---
+  // --- МЕТОДЫ ПОЕЗДОК ---
+
+  static Future<int?> startTrip() async {
+    try {
+      final token = await getAccessToken();
+      if (token == null || token.isEmpty) return null;
+
+      final res = await http.post(
+        Uri.parse('$baseUrl/trips/start'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      );
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        return (data['trip_id'] as num?)?.toInt();
+      }
+    } catch (e) {
+      debugPrint("Ошибка старта поездки: $e");
+    }
+    return null;
+  }
+
+  static Future<bool> finishTrip({
+    required int tripId,
+    required double distanceMeters,
+    required int defectsCount,
+    double smoothRatio = 0.70,
+    double mediumRatio = 0.20,
+    double hardRatio = 0.10,
+  }) async {
+    try {
+      final token = await getAccessToken();
+      if (token == null || token.isEmpty) return false;
+
+      final res = await http.post(
+        Uri.parse('$baseUrl/trips/finish'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode({
+          'trip_id': tripId,
+          'distance_meters': distanceMeters,
+          'defects_count': defectsCount,
+          'smooth_ratio': smoothRatio,
+          'medium_ratio': mediumRatio,
+          'hard_ratio': hardRatio,
+        }),
+      );
+      return res.statusCode == 200;
+    } catch (e) {
+      debugPrint("Ошибка завершения поездки: $e");
+      return false;
+    }
+  }
+
+  static Future<TripData?> getLastTrip() async {
+    try {
+      final token = await getAccessToken();
+      if (token == null || token.isEmpty) return null;
+
+      final res = await http.get(
+        Uri.parse('$baseUrl/trips/last'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (res.statusCode == 200 && res.body.isNotEmpty && res.body != "null") {
+        final data = jsonDecode(res.body);
+        if (data != null && data is Map<String, dynamic> && data['id'] != null) {
+          return TripData.fromJson(data);
+        }
+      }
+    } catch (e) {
+      debugPrint("Ошибка получения последней поездки: $e");
+    }
+    return null;
+  }
+
+  // --- КОММЕНТАРИИ К ДЕФЕКТАМ ---
+
+  static Future<List<DefectComment>> getComments(int clusterId) async {
+    try {
+      final res = await http.get(Uri.parse('$baseUrl/telemetry/comments?cluster_id=$clusterId'));
+      if (res.statusCode == 200) {
+        final List list = jsonDecode(res.body);
+        return list.map((item) => DefectComment.fromJson(item as Map<String, dynamic>)).toList();
+      }
+    } catch (e) {
+      debugPrint("Ошибка получения комментариев: $e");
+    }
+    return [];
+  }
+
+  static Future<bool> addComment({required int clusterId, required String text}) async {
+    try {
+      final token = await getAccessToken();
+      if (token == null || token.isEmpty) return false;
+      final profile = await getUserProfile();
+      final authorName = profile['name']?.toString() ?? 'Водитель';
+
+      final res = await http.post(
+        Uri.parse('$baseUrl/telemetry/comments'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode({
+          'cluster_id': clusterId,
+          'text': text,
+          'author_name': authorName,
+        }),
+      );
+      return res.statusCode == 200;
+    } catch (e) {
+      debugPrint("Ошибка отправки комментария: $e");
+    }
+    return false;
+  }
+
+  // --- МЕТОДЫ АКТИВНОСТИ ПОЛЬЗОВАТЕЛЯ ---
 
   static String _formatDateKey(DateTime dt) {
     final y = dt.year.toString().padLeft(4, '0');
@@ -347,6 +579,8 @@ class ApiService {
         await prefs.setString(_keyAccessToken, data['access_token'] ?? '');
         await prefs.setString(_keyRefreshToken, data['refresh_token'] ?? '');
 
+        await flushPendingDistance();
+
         bool isNew = true;
         if (data['is_new_user'] != null) {
           isNew = data['is_new_user'] == true;
@@ -440,6 +674,16 @@ class ApiService {
 
   static Future<void> logout() async {
     final prefs = await SharedPreferences.getInstance();
+    final refreshToken = prefs.getString(_keyRefreshToken);
+    if (refreshToken != null && refreshToken.isNotEmpty) {
+      try {
+        await http.post(
+          Uri.parse('$baseUrl/auth/logout'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'refresh_token': refreshToken}),
+        );
+      } catch (_) {}
+    }
     await prefs.remove(_keyAccessToken);
     await prefs.remove(_keyRefreshToken);
     await prefs.remove(_keyUserPhone);
@@ -448,21 +692,45 @@ class ApiService {
     await prefs.remove(_keyUserClearance);
   }
 
-// --- ТЕЛЕМЕТРИЯ ДЕФЕКТОВ И ДИСТАНЦИИ ---
+  /// Серверное удаление аккаунта с анонимизацией телеметрии
+  static Future<bool> deleteAccount() async {
+    try {
+      final token = await getAccessToken();
+      if (token == null || token.isEmpty) return false;
 
-  /// Отправка пачки пройденных метров на сервер (любая скорость)
+      final res = await http.delete(
+        Uri.parse('$baseUrl/auth/me'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      );
+      if (res.statusCode == 200) {
+        await logout();
+        return true;
+      }
+    } catch (e) {
+      debugPrint("Ошибка удаления аккаунта: $e");
+    }
+    return false;
+  }
+
+  // --- ТЕЛЕМЕТРИЯ ДЕФЕКТОВ И ДИСТАНЦИИ ---
+
   static Future<bool> sendDistance(double meters) async {
     if (meters <= 0) return true;
     try {
       final token = await getAccessToken();
-      final headers = <String, String>{'Content-Type': 'application/json'};
-      if (token != null && token.isNotEmpty) {
-        headers['Authorization'] = 'Bearer $token';
+      if (token == null || token.isEmpty) {
+        return false;
       }
 
       final response = await http.post(
         Uri.parse('$baseUrl/telemetry/distance'),
-        headers: headers,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
         body: jsonEncode({
           'distance_meters': meters,
         }),
@@ -473,7 +741,31 @@ class ApiService {
       return false;
     }
   }
-  /// Отправка дефекта: счётчик инкрементируется ТОЛЬКО при успешном ответе HTTP 200
+
+  static Future<void> flushPendingDistance() async {
+    try {
+      final token = await getAccessToken();
+      if (token == null || token.isEmpty) return;
+
+      final prefs = await freshPrefs();
+      final pending = prefs.getDouble(kKeyPendingDistanceMeters) ?? 0.0;
+      if (pending <= 0) return;
+
+      final success = await sendDistance(pending);
+      if (success) {
+        final current = prefs.getDouble(kKeyPendingDistanceMeters) ?? 0.0;
+        final remainder = current - pending;
+        await prefs.setDouble(
+          kKeyPendingDistanceMeters,
+          remainder > 0 ? remainder : 0.0,
+        );
+        addLog("✅ Буфер пробега синхронизирован: +${pending.toStringAsFixed(0)} м");
+      }
+    } catch (e) {
+      debugPrint("Ошибка сброса буфера пробега: $e");
+    }
+  }
+
   static Future<bool> sendDefect({
     required double lat,
     required double lon,

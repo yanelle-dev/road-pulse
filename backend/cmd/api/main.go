@@ -16,6 +16,7 @@ import (
 	"road_pulse/backend/internal/handler"
 	"road_pulse/backend/internal/osrm"
 	"road_pulse/backend/internal/service"
+	"road_pulse/backend/internal/sms"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -42,11 +43,14 @@ func main() {
 	// Сервисы
 	osrmClient := osrm.NewClient(cfg.OSRMBase)
 	telemetryService := service.NewTelemetryService(pool, osrmClient)
-	authService := service.NewAuthService(pool, os.Getenv("JWT_SECRET"))
+	smsProvider := sms.NewProviderFromEnv()
+	authService := service.NewAuthService(pool, cfg.JWTSecret, smsProvider)
+	tripService := service.NewTripService(pool)
 
 	// Обработчики
 	telemetryHandler := handler.NewTelemetryHandler(telemetryService)
 	authHandler := handler.NewAuthHandler(authService)
+	tripHandler := handler.NewTripHandler(tripService)
 
 	r := chi.NewRouter()
 
@@ -67,27 +71,53 @@ func main() {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Роуты авторизации
+		// Роуты авторизации и профиля
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/request-code", authHandler.RequestCode)
 			r.Post("/verify-code", authHandler.VerifyCode)
 			r.Post("/refresh", authHandler.Refresh)
+			r.Post("/logout", authHandler.Logout)
 
-			// Защищённые роуты профиля (требуют JWT Bearer)
+			// Защищённые методы профиля
 			r.Group(func(r chi.Router) {
 				r.Use(handler.RequireAuth(authService))
 				r.Get("/me", authHandler.GetMe)
 				r.Patch("/me", authHandler.UpdateMe)
+				r.Delete("/me", authHandler.DeleteMe)
 			})
 		})
 
-		// Телеметрия: использует токен, если он передан, либо fallback для обратной совместимости
+		// Поездки пользователя
+		r.Route("/trips", func(r chi.Router) {
+			r.Use(handler.RequireAuth(authService))
+			r.Post("/start", tripHandler.StartTrip)
+			r.Post("/finish", tripHandler.FinishTrip)
+			r.Get("/last", tripHandler.GetLastTrip)
+		})
+
+		// Телеметрия и комментарии
+		r.Group(func(r chi.Router) {
+			r.Use(handler.RequireAuth(authService))
+			r.Post("/telemetry/comments", telemetryHandler.PostComment)
+		})
+
 		r.Group(func(r chi.Router) {
 			r.Use(handler.OptionalAuth(authService))
 			r.Post("/telemetry", telemetryHandler.PostTelemetry)
 			r.Post("/telemetry/distance", telemetryHandler.PostDistance)
 		})
+
+		// Защищённые методы профиля
+		r.Group(func(r chi.Router) {
+			r.Use(handler.RequireAuth(authService))
+			r.Get("/me", authHandler.GetMe)
+			r.Patch("/me", authHandler.UpdateMe)
+			r.Delete("/me", authHandler.DeleteMe)
+			r.Post("/sync-stats", authHandler.SyncStats)
+		})
+		
 		r.Get("/telemetry", telemetryHandler.GetTelemetry)
+		r.Get("/telemetry/comments", telemetryHandler.GetComments)
 	})
 
 	server := &http.Server{
@@ -98,7 +128,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Дорожный пульс (Road Pulse) Go backend (Auth + Telemetry) слушает порт :%s", cfg.Port)
+		log.Printf("Дорожный пульс (Road Pulse) Go backend слушает порт :%s", cfg.Port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Ошибка HTTP-сервера: %v", err)
 		}

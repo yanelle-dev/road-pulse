@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_service.dart';
+import 'fresh_prefs.dart';
 
 class Achievement {
   final String id;
@@ -298,7 +299,7 @@ class AchievementService {
   ];
 
   static Future<Map<String, int>> _loadRawProgress() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await freshPrefs();
     final raw = prefs.getString(_keyProgress);
     if (raw == null || raw.isEmpty) {
       final initial = <String, int>{};
@@ -360,7 +361,7 @@ class AchievementService {
 
   /// Получение общего накопленного расстояния в метрах
   static Future<double> getTotalDistanceMeters() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await freshPrefs();
     return prefs.getDouble(_keyDistanceMeters) ?? 0.0;
   }
 
