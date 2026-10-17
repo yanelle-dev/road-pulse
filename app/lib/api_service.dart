@@ -550,17 +550,21 @@ class ApiService {
 
   // --- МЕТОДЫ АВТОРИЗАЦИИ И ПРОФИЛЯ ---
 
-  static Future<bool> requestCode(String phone) async {
+  static Future<String?> requestCode(String phone) async {
     try {
       final response = await http.post(
         Uri.parse('$baseUrl/auth/request-code'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'phone': phone}),
       );
-      return response.statusCode == 200;
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['code']?.toString() ?? '';
+      }
+      return null;
     } catch (e) {
       debugPrint("Ошибка запроса кода: $e");
-      return false;
+      return null;
     }
   }
 

@@ -25,7 +25,7 @@ func (h *AuthHandler) RequestCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	retryAfter, err := h.service.RequestCode(r.Context(), payload.Phone)
+	code, retryAfter, err := h.service.RequestCode(r.Context(), payload.Phone)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
@@ -36,6 +36,7 @@ func (h *AuthHandler) RequestCode(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":      "code_sent",
 		"retry_after": retryAfter,
+		"code":        code,
 	})
 }
 

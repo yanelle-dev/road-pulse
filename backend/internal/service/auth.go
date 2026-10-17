@@ -70,17 +70,17 @@ func (s *AuthService) normalizePhone(phone string) string {
 	return res
 }
 
-func (s *AuthService) RequestCode(ctx context.Context, rawPhone string) (int, error) {
+func (s *AuthService) RequestCode(ctx context.Context, rawPhone string) (string, int, error) {
 	phone := s.normalizePhone(rawPhone)
 	if len(phone) < 10 {
-		return 0, errors.New("некорректный номер телефона")
+		return "", 0, errors.New("некорректный номер телефона")
 	}
 
 	var lastCreatedAt time.Time
 	checkQuery := `SELECT created_at FROM otp_codes WHERE phone = $1;`
 	if err := s.pool.QueryRow(ctx, checkQuery, phone).Scan(&lastCreatedAt); err == nil {
 		if time.Since(lastCreatedAt) < 60*time.Second {
-			return 0, ErrRateLimited
+			return "", 0, ErrRateLimited
 		}
 	}
 
@@ -100,14 +100,14 @@ func (s *AuthService) RequestCode(ctx context.Context, rawPhone string) (int, er
 			created_at = NOW();
 	`
 	if _, err := s.pool.Exec(ctx, query, phone, codeHash, expiresAt); err != nil {
-		return 0, fmt.Errorf("ошибка сохранения OTP: %w", err)
+		return "", 0, fmt.Errorf("ошибка сохранения OTP: %w", err)
 	}
 
 	if err := s.sms.SendCode(ctx, phone, code); err != nil {
-		return 0, fmt.Errorf("ошибка отправки SMS: %w", err)
+		return "", 0, fmt.Errorf("ошибка отправки SMS: %w", err)
 	}
 
-	return 60, nil
+	return code, 60, nil
 }
 
 func (s *AuthService) VerifyCode(ctx context.Context, rawPhone, code string) (*models.AuthResponse, error) {

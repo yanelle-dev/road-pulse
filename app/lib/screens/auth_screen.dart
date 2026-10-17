@@ -20,6 +20,7 @@ class _AuthScreenState extends State<AuthScreen> {
 
   String _phoneDigits = "";
   String _codeDigits = "";
+  String? _devCode;
   int _resendTimerSeconds = 60;
   Timer? _resendTimer;
   bool _isLoading = false;
@@ -53,12 +54,13 @@ class _AuthScreenState extends State<AuthScreen> {
   Future<void> _handleRequestCode() async {
     setState(() => _isLoading = true);
     final phone = "+7$_phoneDigits";
-    final success = await ApiService.requestCode(phone);
+    final code = await ApiService.requestCode(phone);
     setState(() => _isLoading = false);
 
-    if (success) {
+    if (code != null) {
       _startTimer();
       setState(() {
+        _devCode = code.isNotEmpty ? code : null;
         _codeDigits = "";
         _step = AuthStep.code;
       });
@@ -82,10 +84,8 @@ class _AuthScreenState extends State<AuthScreen> {
 
     if (result.success) {
       if (result.isNewUser) {
-        // Новый пользователь — отправляем на заполнение профиля
         setState(() => _step = AuthStep.name);
       } else {
-        // Уже существующий пользователь — сразу переходим на главный экран!
         Navigator.pushAndRemoveUntil(
           context,
           MaterialPageRoute(builder: (_) => const MainScaffold()),
@@ -434,7 +434,48 @@ class _AuthScreenState extends State<AuthScreen> {
                   color: colors.ink2,
                 ),
               ),
-              const SizedBox(height: 26),
+              if (_devCode != null) ...[
+                const SizedBox(height: 14),
+                InkWell(
+                  onTap: () {
+                    setState(() => _codeDigits = _devCode!);
+                    _handleVerifyCode(_devCode!);
+                  },
+                  borderRadius: BorderRadius.circular(14),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 9,
+                    ),
+                    decoration: BoxDecoration(
+                      color: colors.surf,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: colors.mark, width: 1.5),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.vpn_key_rounded,
+                          size: 16,
+                          color: colors.markInk,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          "Тестовый код: $_devCode (нажмите)",
+                          style: TextStyle(
+                            fontFamily: AppTheme.fontMono,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: colors.ink,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 22),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: List.generate(4, (index) {
@@ -490,7 +531,7 @@ class _AuthScreenState extends State<AuthScreen> {
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        "Код не подошёл. Проверьте консоль Go-сервера (или введите 1234)",
+                        "Неверный код. Введите актуальный код подтверждения",
                         style: TextStyle(
                           fontFamily: AppTheme.fontUi,
                           fontSize: 11.5,
