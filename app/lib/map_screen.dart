@@ -7,10 +7,13 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart' hide Path;
 
+import 'address_service.dart';
 import 'api_service.dart';
 import 'app_theme.dart';
-import 'constants.dart';
+import 'calculations.dart';
+import 'gps.dart';
 import 'pothole_details_screen.dart';
+import 'widgets/nav_arrow.dart';
 import 'widgets/road_ribbon.dart';
 
 class MapScreen extends StatefulWidget {
@@ -23,16 +26,22 @@ class MapScreen extends StatefulWidget {
 }
 
 class _MapScreenState extends State<MapScreen> {
+  /// Ниже этой скорости курс GPS шумит и стрелка «дрожит»: остаётся последний уверенный курс.
+  static const double _minHeadingSpeedMs = 1.5;
+
   final MapController _mapController = MapController();
   List<dynamic> _bumps = [];
   LatLng? _myLocation;
+  double? _headingDeg;
   double _currentSpeedKmh = 0.0;
   bool _isServiceRunning = false;
   StreamSubscription<Position>? _positionStream;
+  late Future<UserStats> _statsFuture;
 
   @override
   void initState() {
     super.initState();
+    _statsFuture = ApiService.getUserStats();
     _loadBumps();
     _locateUser();
     _checkServiceStatus();
@@ -52,18 +61,28 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  /// Позиция, скорость и курс из одного места: раньше это были две копии в слушателе и в _locateUser.
+  void _applyPosition(Position pos) {
+    _myLocation = LatLng(pos.latitude, pos.longitude);
+    _currentSpeedKmh = (pos.speed * 3.6).clamp(0.0, 999.0);
+
+    if (pos.speed < _minHeadingSpeedMs || pos.heading < 0) return;
+    final prev = _headingDeg;
+    if (prev == null) {
+      _headingDeg = pos.heading;
+      return;
+    }
+    var delta = (pos.heading - prev) % 360;
+    if (delta > 180) delta -= 360;
+    _headingDeg = prev + delta; // без обнуления на 360°, иначе стрелка крутится «через весь круг»
+  }
+
   void _initSpeedListener() {
     _positionStream = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 2,
-      ),
+      locationSettings: gpsStreamSettings(distanceFilter: 2),
     ).listen((pos) {
       if (mounted) {
-        setState(() {
-          _myLocation = LatLng(pos.latitude, pos.longitude);
-          _currentSpeedKmh = (pos.speed * 3.6).clamp(0.0, 999.0);
-        });
+        setState(() => _applyPosition(pos));
       }
     });
   }
@@ -76,10 +95,7 @@ class _MapScreenState extends State<MapScreen> {
         ),
       );
       if (mounted) {
-        setState(() {
-          _myLocation = LatLng(pos.latitude, pos.longitude);
-          _currentSpeedKmh = (pos.speed * 3.6).clamp(0.0, 999.0);
-        });
+        setState(() => _applyPosition(pos));
         _mapController.move(_myLocation!, 15.0);
       }
     } catch (e) {
@@ -100,45 +116,52 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  Color _severityColor(PolotnoColors colors, int severity) =>
+      severity == 3 ? colors.s3 : (severity == 2 ? colors.s2 : colors.s1);
+
+  /// Линии участка тряски: сервер присылает их по отдельности (`lines`), старые ответы — одной ломаной.
+  List<List<LatLng>> _linesOf(dynamic bump) {
+    if (bump['defect_type'] != 'rough_road') return const [];
+
+    final rawLines = bump['lines'];
+    final List<dynamic> sources = (rawLines is List && rawLines.isNotEmpty)
+        ? rawLines
+        : [bump['coordinates']];
+
+    final result = <List<LatLng>>[];
+    for (final source in sources) {
+      if (source is! List) continue;
+      final points = <LatLng>[
+        for (final pt in source)
+          if (pt is List && pt.length >= 2)
+            LatLng((pt[0] as num).toDouble(), (pt[1] as num).toDouble()),
+      ];
+      if (points.length >= 2) result.add(points);
+    }
+    return result;
+  }
+
   List<Polyline> _buildPolylines(PolotnoColors colors) {
     final List<Polyline> polylines = [];
 
     for (final b in _bumps) {
-      if (b['defect_type'] != 'rough_road') continue;
+      final lines = _linesOf(b);
+      if (lines.isEmpty) continue;
 
-      final rawCoords = b['coordinates'];
-      if (rawCoords is! List || rawCoords.length < 2) continue;
-
-      final List<LatLng> points = [];
-      for (final pt in rawCoords) {
-        if (pt is List && pt.length >= 2) {
-          final lat = (pt[0] as num).toDouble();
-          final lon = (pt[1] as num).toDouble();
-          points.add(LatLng(lat, lon));
-        }
-      }
-
-      if (points.length < 2) continue;
-
-      final double force = ((b['max_force'] ?? 0.0) as num).toDouble();
       final bool isConfirmed = b['is_confirmed'] ?? false;
+      final lineColor = _severityColor(colors, defectSeverity(b));
 
-      Color lineColor = colors.s1;
-      if (force > kSeverityHard) {
-        lineColor = colors.s3;
-      } else if (force > kSeverityMedium) {
-        lineColor = colors.s2;
+      for (final points in lines) {
+        polylines.add(
+          Polyline(
+            points: points,
+            strokeWidth: isConfirmed ? 5.0 : 3.5,
+            color: isConfirmed ? lineColor : lineColor.withValues(alpha: 0.65),
+            borderColor: colors.asphalt,
+            borderStrokeWidth: isConfirmed ? 1.5 : 0.0,
+          ),
+        );
       }
-
-      polylines.add(
-        Polyline(
-          points: points,
-          strokeWidth: isConfirmed ? 5.0 : 3.5,
-          color: isConfirmed ? lineColor : lineColor.withValues(alpha: 0.65),
-          borderColor: colors.asphalt,
-          borderStrokeWidth: isConfirmed ? 1.5 : 0.0,
-        ),
-      );
     }
 
     return polylines;
@@ -152,25 +175,15 @@ class _MapScreenState extends State<MapScreen> {
       if (!isConfirmed) continue;
 
       // Участки с геометрией линий уже отрисованы в PolylineLayer
-      if (b['defect_type'] == 'rough_road' && (b['coordinates'] as List?)?.isNotEmpty == true) {
-        continue;
-      }
+      if (_linesOf(b).isNotEmpty) continue;
 
-      final double force = (b['max_force'] ?? 0.0).toDouble();
       final double lat = (b['lat'] ?? b['latitude'] ?? 0.0).toDouble();
       final double lon = (b['lon'] ?? b['longitude'] ?? 0.0).toDouble();
       final LatLng point = LatLng(lat, lon);
 
-      Color bumpColor = colors.s1;
-      double radius = 10.0;
-
-      if (force > kSeverityHard) {
-        bumpColor = colors.s3;
-        radius = 16.0;
-      } else if (force > kSeverityMedium) {
-        bumpColor = colors.s2;
-        radius = 12.0;
-      }
+      final severity = defectSeverity(b);
+      final bumpColor = _severityColor(colors, severity);
+      final double radius = severity == 3 ? 16.0 : (severity == 2 ? 12.0 : 10.0);
 
       circles.add(
         CircleMarker(
@@ -204,9 +217,7 @@ class _MapScreenState extends State<MapScreen> {
       final bool isConfirmed = b['is_confirmed'] ?? false;
       if (isConfirmed) continue;
 
-      if (b['defect_type'] == 'rough_road' && (b['coordinates'] as List?)?.isNotEmpty == true) {
-        continue;
-      }
+      if (_linesOf(b).isNotEmpty) continue;
 
       final double lat = (b['lat'] ?? b['latitude'] ?? 0.0).toDouble();
       final double lon = (b['lon'] ?? b['longitude'] ?? 0.0).toDouble();
@@ -259,9 +270,9 @@ class _MapScreenState extends State<MapScreen> {
                   if (_myLocation != null)
                     Marker(
                       point: _myLocation!,
-                      width: 36,
-                      height: 36,
-                      child: _buildUserLocationMarker(colors),
+                      width: NavArrow.size,
+                      height: NavArrow.size,
+                      child: NavArrow(headingDeg: _headingDeg),
                     ),
                 ],
               ),
@@ -282,6 +293,7 @@ class _MapScreenState extends State<MapScreen> {
               icon: Icons.my_location,
               iconColor: colors.markInk,
               onTap: () {
+                setState(() => _statsFuture = ApiService.getUserStats());
                 _loadBumps();
                 _locateUser();
                 _checkServiceStatus();
@@ -299,23 +311,6 @@ class _MapScreenState extends State<MapScreen> {
             ),
           ),
           _buildDraggableSheet(colors),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildUserLocationMarker(PolotnoColors colors) {
-    return Container(
-      decoration: BoxDecoration(
-        color: colors.mark,
-        shape: BoxShape.circle,
-        border: Border.all(color: colors.asphalt, width: 3.5),
-        boxShadow: [
-          BoxShadow(
-            color: colors.mark.withValues(alpha: 0.45),
-            blurRadius: 16,
-            spreadRadius: 4,
-          ),
         ],
       ),
     );
@@ -440,10 +435,10 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _buildDraggableSheet(PolotnoColors colors) {
-    final int hardCount = _bumps.where((b) {
-      final f = (b['max_force'] ?? 0.0).toDouble();
-      return f > kSeverityHard;
-    }).length;
+    final severities = [for (final b in _bumps) defectSeverity(b)];
+    final int hardCount = severities.where((s) => s == 3).length;
+    final int mediumCount = severities.where((s) => s == 2).length;
+    final int smoothCount = severities.length - hardCount - mediumCount;
 
     // Сортируем реальные дефекты по расстоянию от текущей позиции
     final List<Map<String, dynamic>> nearestBumps = [];
@@ -531,16 +526,17 @@ class _MapScreenState extends State<MapScreen> {
               const SizedBox(height: 14),
               RoadRibbon(
                 height: 14,
-                currentPosition: 0.2,
-                segments: [
-                  RibbonSegment(flex: 0.65, color: colors.s1),
-                  RibbonSegment(flex: 0.20, color: colors.s2),
-                  RibbonSegment(flex: 0.15, color: colors.s3),
-                ],
+                segments: severities.isEmpty
+                    ? [RibbonSegment(flex: 1, color: colors.s1)]
+                    : [
+                        RibbonSegment(flex: smoothCount / severities.length, color: colors.s1),
+                        RibbonSegment(flex: mediumCount / severities.length, color: colors.s2),
+                        RibbonSegment(flex: hardCount / severities.length, color: colors.s3),
+                      ],
               ),
               const SizedBox(height: 16),
               FutureBuilder<UserStats>(
-                future: ApiService.getUserStats(),
+                future: _statsFuture,
                 builder: (context, snap) {
                   final stats = snap.data ?? UserStats.empty();
                   return Row(
@@ -601,22 +597,20 @@ class _MapScreenState extends State<MapScreen> {
                 ...displayDefects.map((bump) {
                   final lat = (bump['lat'] ?? bump['latitude'] ?? 0.0).toDouble();
                   final lon = (bump['lon'] ?? bump['longitude'] ?? 0.0).toDouble();
-                  final force = (bump['max_force'] ?? 0.0).toDouble();
                   final distM = (bump['calc_distance_m'] as double?) ?? 0.0;
                   final distStr = distM >= 1000 ? "${(distM / 1000).toStringAsFixed(1)} км" : "${distM.round()} м";
                   final confirms = bump['total_hits'] ?? bump['unique_users'] ?? 1;
-
-                  final isHard = force > kSeverityHard;
-                  final isMed = force > kSeverityMedium;
+                  final severity = defectSeverity(bump);
 
                   return _buildDefectRow(
                     colors: colors,
                     title: bump['defect_type'] == 'rough_road' ? "Неровная дорога" : "Дефект полотна",
-                    coord: "${lat.toStringAsFixed(4)}, ${lon.toStringAsFixed(4)}",
+                    coord: AddressService.fromDefect(bump) ??
+                        "${lat.toStringAsFixed(4)}, ${lon.toStringAsFixed(4)}",
                     time: distStr,
-                    levelText: isHard ? "ЖЁСТКО" : (isMed ? "ЗАМЕТНО" : "РОВНО"),
-                    levelColor: isHard ? colors.s3 : (isMed ? colors.s2 : colors.s1),
-                    levelBg: isHard ? colors.s3Soft : (isMed ? colors.s2Soft : colors.s1Soft),
+                    levelText: severity == 3 ? "ЖЁСТКО" : (severity == 2 ? "ЗАМЕТНО" : "РОВНО"),
+                    levelColor: _severityColor(colors, severity),
+                    levelBg: severity == 3 ? colors.s3Soft : (severity == 2 ? colors.s2Soft : colors.s1Soft),
                     confirms: confirms,
                     rawDefect: bump,
                   );
@@ -755,6 +749,8 @@ class _MapScreenState extends State<MapScreen> {
                   const SizedBox(height: 2),
                   Text(
                     coord,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontFamily: AppTheme.fontMono,
                       fontSize: 10.5,

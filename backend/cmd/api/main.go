@@ -22,13 +22,25 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
+const (
+	codeRequestsPerWindow   = 5
+	codeVerifiesPerWindow   = 20
+	otpLimitWindow          = 10 * time.Minute
+	telemetryPerMinute      = 120
+	distancePerMinute       = 90
+	commentsPerMinute       = 10
+	tripsPerMinute          = 30
+	perMinuteWindow         = time.Minute
+)
+
 func main() {
 	cfg := config.Load()
+	trustProxy := cfg.TrustProxy
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("Подключение к PostGIS: %s", cfg.DatabaseURL)
+	log.Println("Подключение к PostGIS...") // DSN с паролем в лог не пишем
 	pool, err := database.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: невозможно подключиться к БД: %v", err)
@@ -43,7 +55,7 @@ func main() {
 	// Сервисы
 	osrmClient := osrm.NewClient(cfg.OSRMBase)
 	telemetryService := service.NewTelemetryService(pool, osrmClient)
-	smsProvider := sms.NewProviderFromEnv()
+	smsProvider := sms.NewProvider(cfg)
 	authService := service.NewAuthService(pool, cfg.JWTSecret, smsProvider)
 	tripService := service.NewTripService(pool)
 
@@ -51,6 +63,13 @@ func main() {
 	telemetryHandler := handler.NewTelemetryHandler(telemetryService)
 	authHandler := handler.NewAuthHandler(authService)
 	tripHandler := handler.NewTripHandler(tripService)
+
+	codeLimit := handler.RateLimit(handler.NewRateLimiter(codeRequestsPerWindow, otpLimitWindow), trustProxy)
+	verifyLimit := handler.RateLimit(handler.NewRateLimiter(codeVerifiesPerWindow, otpLimitWindow), trustProxy)
+	tripLimit := handler.RateLimit(handler.NewRateLimiter(tripsPerMinute, perMinuteWindow), trustProxy)
+	telemetryLimit := handler.RateLimit(handler.NewRateLimiter(telemetryPerMinute, perMinuteWindow), trustProxy)
+	distanceLimit := handler.RateLimit(handler.NewRateLimiter(distancePerMinute, perMinuteWindow), trustProxy)
+	commentLimit := handler.RateLimit(handler.NewRateLimiter(commentsPerMinute, perMinuteWindow), trustProxy)
 
 	r := chi.NewRouter()
 
@@ -73,8 +92,8 @@ func main() {
 	r.Route("/api/v1", func(r chi.Router) {
 		// Роуты авторизации и профиля
 		r.Route("/auth", func(r chi.Router) {
-			r.Post("/request-code", authHandler.RequestCode)
-			r.Post("/verify-code", authHandler.VerifyCode)
+			r.With(codeLimit).Post("/request-code", authHandler.RequestCode)
+			r.With(verifyLimit).Post("/verify-code", authHandler.VerifyCode)
 			r.Post("/refresh", authHandler.Refresh)
 			r.Post("/logout", authHandler.Logout)
 
@@ -84,12 +103,13 @@ func main() {
 				r.Get("/me", authHandler.GetMe)
 				r.Patch("/me", authHandler.UpdateMe)
 				r.Delete("/me", authHandler.DeleteMe)
+				r.Post("/sync-stats", authHandler.SyncStats)
 			})
 		})
 
 		// Поездки пользователя
 		r.Route("/trips", func(r chi.Router) {
-			r.Use(handler.RequireAuth(authService))
+			r.Use(handler.RequireAuth(authService), tripLimit)
 			r.Post("/start", tripHandler.StartTrip)
 			r.Post("/finish", tripHandler.FinishTrip)
 			r.Get("/last", tripHandler.GetLastTrip)
@@ -98,24 +118,15 @@ func main() {
 		// Телеметрия и комментарии
 		r.Group(func(r chi.Router) {
 			r.Use(handler.RequireAuth(authService))
-			r.Post("/telemetry/comments", telemetryHandler.PostComment)
+			r.With(commentLimit).Post("/telemetry/comments", telemetryHandler.PostComment)
 		})
 
 		r.Group(func(r chi.Router) {
 			r.Use(handler.OptionalAuth(authService))
-			r.Post("/telemetry", telemetryHandler.PostTelemetry)
-			r.Post("/telemetry/distance", telemetryHandler.PostDistance)
+			r.With(telemetryLimit).Post("/telemetry", telemetryHandler.PostTelemetry)
+			r.With(distanceLimit).Post("/telemetry/distance", telemetryHandler.PostDistance)
 		})
 
-		// Защищённые методы профиля
-		r.Group(func(r chi.Router) {
-			r.Use(handler.RequireAuth(authService))
-			r.Get("/me", authHandler.GetMe)
-			r.Patch("/me", authHandler.UpdateMe)
-			r.Delete("/me", authHandler.DeleteMe)
-			r.Post("/sync-stats", authHandler.SyncStats)
-		})
-		
 		r.Get("/telemetry", telemetryHandler.GetTelemetry)
 		r.Get("/telemetry/comments", telemetryHandler.GetComments)
 	})

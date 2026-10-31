@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:geocoding/geocoding.dart';
+
+import 'api_service.dart';
 import 'app_theme.dart';
 import 'calculations.dart';
-import 'constants.dart';
 import 'pothole_details_screen.dart';
-import 'api_service.dart';
+import 'widgets/defect_address.dart';
 import 'widgets/road_ribbon.dart';
 
 class ListScreen extends StatefulWidget {
@@ -64,18 +64,6 @@ class _ListScreenState extends State<ListScreen> {
 
   DateTime _parseDate(dynamic bump) {
     return parseDefectDate(bump['created_at'] ?? bump['timestamp']);
-  }
-
-  Future<String> _getAddress(double lat, double lon) async {
-    try {
-      final geocoding = Geocoding();
-      List<Placemark> placemarks = await geocoding.placemarkFromCoordinates(lat, lon);
-      if (placemarks.isNotEmpty) {
-        final p = placemarks.first;
-        return "${p.street ?? 'Улица'}, ${p.locality ?? 'Москва'}";
-      }
-    } catch (_) {}
-    return "Ш: ${lat.toStringAsFixed(4)}, Д: ${lon.toStringAsFixed(4)}";
   }
 
   @override
@@ -147,13 +135,13 @@ class _ListScreenState extends State<ListScreen> {
     int countS3 = 0;
 
     for (final b in _allBumps) {
-      final double force = (b['max_force'] ?? 0.0).toDouble();
-      if (force > kSeverityHard) {
-        countS3++;
-      } else if (force > kSeverityMedium) {
-        countS2++;
-      } else {
-        countS1++;
+      switch (defectSeverity(b)) {
+        case 3:
+          countS3++;
+        case 2:
+          countS2++;
+        default:
+          countS1++;
       }
     }
 
@@ -303,30 +291,20 @@ class _ListScreenState extends State<ListScreen> {
   }
 
   Widget _buildDefectCard(PolotnoColors colors, dynamic bump) {
+    final defect = bump as Map<String, dynamic>;
     final double lat = (bump['latitude'] ?? bump['lat'] ?? 0.0).toDouble();
     final double lon = (bump['longitude'] ?? bump['lon'] ?? 0.0).toDouble();
-    final double force = (bump['max_force'] ?? 0.0).toDouble();
     final int confirms = bump['total_hits'] ?? bump['unique_users'] ?? 1;
 
-    Color levelColor = colors.s1;
-    Color levelBg = colors.s1Soft;
-    String levelText = "РОВНО";
-    String sizeStr = "S";
-
-    if (force > kSeverityHard) {
-      levelColor = colors.s3;
-      levelBg = colors.s3Soft;
-      levelText = "ЖЁСТКО";
-      sizeStr = "L";
-    } else if (force > kSeverityMedium) {
-      levelColor = colors.s2;
-      levelBg = colors.s2Soft;
-      levelText = "ЗАМЕТНО";
-      sizeStr = "M";
-    }
+    final severity = defectSeverity(defect);
+    final Color levelColor = severity == 3 ? colors.s3 : (severity == 2 ? colors.s2 : colors.s1);
+    final Color levelBg = severity == 3 ? colors.s3Soft : (severity == 2 ? colors.s2Soft : colors.s1Soft);
+    final String levelText = severity == 3 ? "ЖЁСТКО" : (severity == 2 ? "ЗАМЕТНО" : "РОВНО");
+    final String sizeStr = severity == 3 ? "L" : (severity == 2 ? "M" : "S");
 
     final date = _parseDate(bump);
-    final timeStr = "${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}";
+    String two(int n) => n.toString().padLeft(2, '0');
+    final dateStr = "${two(date.day)}.${two(date.month)} · ${two(date.hour)}:${two(date.minute)}";
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
@@ -343,7 +321,7 @@ class _ListScreenState extends State<ListScreen> {
             Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (_) => PotholeDetailsScreen(defect: bump),
+                builder: (_) => PotholeDetailsScreen(defect: defect),
               ),
             );
           },
@@ -390,22 +368,15 @@ class _ListScreenState extends State<ListScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      FutureBuilder<String>(
-                        future: _getAddress(lat, lon),
-                        builder: (context, snapshot) {
-                          return Text(
-                            snapshot.data ?? "Определение адреса...",
-                            style: TextStyle(
-                              fontFamily: AppTheme.fontUi,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                              color: colors.ink,
-                              letterSpacing: -0.3,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          );
-                        },
+                      DefectAddress(
+                        defect: defect,
+                        style: TextStyle(
+                          fontFamily: AppTheme.fontUi,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: colors.ink,
+                          letterSpacing: -0.3,
+                        ),
                       ),
                       const SizedBox(height: 3),
                       Text(
@@ -418,7 +389,7 @@ class _ListScreenState extends State<ListScreen> {
                       ),
                       const SizedBox(height: 3),
                       Text(
-                        "$timeStr · 1,2 км",
+                        dateStr,
                         style: TextStyle(
                           fontFamily: AppTheme.fontUi,
                           fontSize: 12,

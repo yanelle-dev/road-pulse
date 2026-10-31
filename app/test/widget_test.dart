@@ -135,8 +135,8 @@ void main() {
 
   group('ApiService — конфигурация URL адресов через окружение (№6)', () {
     test('дефолтный baseUrl и apiUrl соответствуют спецификации', () {
-      expect(ApiService.baseUrl, 'http://31.77.105.240:8001/api/v1');
-      expect(ApiService.apiUrl, 'http://31.77.105.240:8001/api/v1/telemetry');
+      expect(ApiService.baseUrl, 'http://64.188.74.105:8001/api/v1');
+      expect(ApiService.apiUrl, 'http://64.188.74.105:8001/api/v1/telemetry');
       expect(ApiService.baseUrl.endsWith('/'), isFalse);
     });
   });

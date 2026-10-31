@@ -52,6 +52,18 @@ func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"CREATE INDEX IF NOT EXISTS idx_telemetry_location ON telemetry USING GIST(location);",
 		"ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS defect_type VARCHAR DEFAULT 'pothole';",
 		"ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS infrastructure_type VARCHAR DEFAULT 'road';",
+		"ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS client_event_id VARCHAR(64);",
+		"ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS raw_bump_force DOUBLE PRECISION;",
+		"ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS severity SMALLINT;",
+		"ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS road_name VARCHAR(120);",
+		// Старые строки получают серьёзность по прежним порогам нормализованной силы.
+		"UPDATE telemetry SET severity = CASE WHEN bump_force > 30 THEN 3 WHEN bump_force > 20 THEN 2 ELSE 1 END WHERE severity IS NULL;",
+		// Идемпотентность в рамках пользователя: чужой client_event_id не должен возвращать чужую запись.
+		// NULL-значения в UNIQUE различны, поэтому старые строки и клиенты без id не конфликтуют.
+		"DROP INDEX IF EXISTS ux_telemetry_client_event_id;",
+		"CREATE UNIQUE INDEX IF NOT EXISTS ux_telemetry_user_event ON telemetry(user_id, client_event_id);",
+		"CREATE INDEX IF NOT EXISTS idx_telemetry_user_type_time ON telemetry(user_id, defect_type, timestamp DESC);",
+		"CREATE INDEX IF NOT EXISTS idx_telemetry_type_time ON telemetry(defect_type, timestamp DESC);",
 
 		// Таблицы подсистемы авторизации
 		`CREATE TABLE IF NOT EXISTS users (

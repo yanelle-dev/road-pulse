@@ -175,10 +175,20 @@ class UserStats {
   }
 }
 
+/// Итог отправки дефекта: HTTP-статус (0 — сеть/таймаут) и признак повтора.
+class DefectSendResult {
+  final int status;
+
+  /// Сервер уже знает эту яму (повтор события или тот же проезд): в счётчик она не идёт.
+  final bool duplicate;
+
+  const DefectSendResult(this.status, {this.duplicate = false});
+}
+
 class ApiService {
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://31.77.105.240:8001/api/v1',
+    defaultValue: 'http://64.188.74.105:8001/api/v1',
   );
   static const String apiUrl = '$baseUrl/telemetry';
 
@@ -186,6 +196,83 @@ class ApiService {
 
   static const String _keyAccessToken = 'auth_access_token';
   static const String _keyRefreshToken = 'auth_refresh_token';
+
+  static const Duration _httpTimeout = Duration(seconds: 12);
+
+  /// Общий клиент: `http.post(...)` открывал новое соединение на каждый запрос.
+  static final http.Client _client = http.Client();
+  static Future<bool>? _refreshInFlight;
+
+  /// Access-токен с автообновлением: если он истекает в ближайшие 60 с,
+  /// меняем его по refresh-токену (раньше refresh нигде не использовался).
+  static Future<String?> getValidAccessToken() async {
+    final prefs = await freshPrefs();
+    final token = prefs.getString(_keyAccessToken);
+    if (token == null || token.isEmpty) return null;
+    if (!_isExpiring(token)) return token;
+    await refreshTokens();
+    final p2 = await freshPrefs();
+    final t2 = p2.getString(_keyAccessToken);
+    return (t2 == null || t2.isEmpty) ? null : t2;
+  }
+
+  static bool _isExpiring(String jwt) {
+    try {
+      final parts = jwt.split('.');
+      if (parts.length != 3) return false;
+      final payload = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
+      ) as Map<String, dynamic>;
+      final exp = (payload['exp'] as num?)?.toInt();
+      if (exp == null) return false;
+      return DateTime.now().millisecondsSinceEpoch ~/ 1000 >= exp - 60;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<bool> refreshTokens() {
+    return _refreshInFlight ??=
+        _doRefresh().whenComplete(() => _refreshInFlight = null);
+  }
+
+  static Future<bool> _doRefresh() async {
+    try {
+      final prefs = await freshPrefs();
+      final rt = prefs.getString(_keyRefreshToken);
+      if (rt == null || rt.isEmpty) return false;
+      final oldAccess = prefs.getString(_keyAccessToken);
+
+      final res = await _client
+          .post(
+            Uri.parse('$baseUrl/auth/refresh'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'refresh_token': rt}),
+          )
+          .timeout(_httpTimeout);
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        final access = data['access_token'] as String?;
+        final refresh = data['refresh_token'] as String?;
+        if (access == null || access.isEmpty || refresh == null || refresh.isEmpty) {
+          return false;
+        }
+        final p = await SharedPreferences.getInstance();
+        await p.setString(_keyAccessToken, access);
+        await p.setString(_keyRefreshToken, refresh);
+        return true;
+      }
+      // refresh ротируется: другой изолят мог уже обновить пару.
+      final p2 = await freshPrefs();
+      final rotatedElsewhere = p2.getString(_keyAccessToken) != oldAccess;
+      // Refresh отозван или истёк: токен «лежит» в хранилище, но пользователь уже не авторизован.
+      if (!rotatedElsewhere && res.statusCode == 401) await _clearSession();
+      return rotatedElsewhere;
+    } catch (_) {
+      return false;
+    }
+  }
   static const String _keyUserPhone = 'auth_user_phone';
   static const String _keyUserName = 'auth_user_name';
   static const String _keyUserCity = 'auth_user_city';
@@ -216,7 +303,7 @@ class ApiService {
   }
 
   static Future<void> incrementDefectsCount([int delta = 1]) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await freshPrefs();
     final current = prefs.getInt(_keyDefectsCount) ?? 0;
     final next = current + delta;
     await prefs.setInt(_keyDefectsCount, next);
@@ -243,7 +330,7 @@ class ApiService {
       if (token != null && token.isNotEmpty) {
         try {
           // Один атомарный запрос: передаёт серию/награды и сразу возвращает эталонную статистику
-          final res = await http.post(
+          final res = await _client.post(
             Uri.parse('$baseUrl/auth/sync-stats'),
             headers: {
               'Content-Type': 'application/json',
@@ -253,7 +340,7 @@ class ApiService {
               'streak_days': streakDays,
               'unlocked_achievements': unlockedAchievements,
             }),
-          );
+          ).timeout(_httpTimeout);
 
           if (res.statusCode == 200) {
             final data = jsonDecode(res.body);
@@ -306,13 +393,13 @@ class ApiService {
       final token = await getAccessToken();
       if (token == null || token.isEmpty) return null;
 
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/trips/start'),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $token',
         },
-      );
+      ).timeout(_httpTimeout);
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
         return (data['trip_id'] as num?)?.toInt();
@@ -335,7 +422,7 @@ class ApiService {
       final token = await getAccessToken();
       if (token == null || token.isEmpty) return false;
 
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/trips/finish'),
         headers: {
           'Content-Type': 'application/json',
@@ -349,7 +436,7 @@ class ApiService {
           'medium_ratio': mediumRatio,
           'hard_ratio': hardRatio,
         }),
-      );
+      ).timeout(_httpTimeout);
       return res.statusCode == 200;
     } catch (e) {
       debugPrint("Ошибка завершения поездки: $e");
@@ -362,10 +449,10 @@ class ApiService {
       final token = await getAccessToken();
       if (token == null || token.isEmpty) return null;
 
-      final res = await http.get(
+      final res = await _client.get(
         Uri.parse('$baseUrl/trips/last'),
         headers: {'Authorization': 'Bearer $token'},
-      );
+      ).timeout(_httpTimeout);
       if (res.statusCode == 200 && res.body.isNotEmpty && res.body != "null") {
         final data = jsonDecode(res.body);
         if (data != null && data is Map<String, dynamic> && data['id'] != null) {
@@ -382,7 +469,7 @@ class ApiService {
 
   static Future<List<DefectComment>> getComments(int clusterId) async {
     try {
-      final res = await http.get(Uri.parse('$baseUrl/telemetry/comments?cluster_id=$clusterId'));
+      final res = await _client.get(Uri.parse('$baseUrl/telemetry/comments?cluster_id=$clusterId')).timeout(_httpTimeout);
       if (res.statusCode == 200) {
         final List list = jsonDecode(res.body);
         return list.map((item) => DefectComment.fromJson(item as Map<String, dynamic>)).toList();
@@ -400,7 +487,7 @@ class ApiService {
       final profile = await getUserProfile();
       final authorName = profile['name']?.toString() ?? 'Водитель';
 
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/telemetry/comments'),
         headers: {
           'Content-Type': 'application/json',
@@ -411,7 +498,7 @@ class ApiService {
           'text': text,
           'author_name': authorName,
         }),
-      );
+      ).timeout(_httpTimeout);
       return res.statusCode == 200;
     } catch (e) {
       debugPrint("Ошибка отправки комментария: $e");
@@ -552,11 +639,11 @@ class ApiService {
 
   static Future<String?> requestCode(String phone) async {
     try {
-      final response = await http.post(
+      final response = await _client.post(
         Uri.parse('$baseUrl/auth/request-code'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'phone': phone}),
-      );
+      ).timeout(_httpTimeout);
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         return data['code']?.toString() ?? '';
@@ -570,11 +657,11 @@ class ApiService {
 
   static Future<VerifyResult> verifyCode(String phone, String code) async {
     try {
-      final response = await http.post(
+      final response = await _client.post(
         Uri.parse('$baseUrl/auth/verify-code'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'phone': phone, 'code': code}),
-      );
+      ).timeout(_httpTimeout);
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -636,7 +723,7 @@ class ApiService {
 
       final token = prefs.getString(_keyAccessToken);
       if (token != null && token.isNotEmpty) {
-        await http.patch(
+        await _client.patch(
           Uri.parse('$baseUrl/auth/me'),
           headers: {
             'Content-Type': 'application/json',
@@ -647,7 +734,7 @@ class ApiService {
             'city': city,
             'car_clearance': clearance,
           }),
-        );
+        ).timeout(_httpTimeout);
       }
       return true;
     } catch (e) {
@@ -656,10 +743,7 @@ class ApiService {
     }
   }
 
-  static Future<String?> getAccessToken() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_keyAccessToken);
-  }
+  static Future<String?> getAccessToken() => getValidAccessToken();
 
   static Future<bool> isAuthenticated() async {
     final token = await getAccessToken();
@@ -669,7 +753,7 @@ class ApiService {
   static Future<Map<String, dynamic>> getUserProfile() async {
     final prefs = await SharedPreferences.getInstance();
     return {
-      'phone': prefs.getString(_keyUserPhone) ?? '+7 999 123-45-67',
+      'phone': prefs.getString(_keyUserPhone) ?? '',
       'name': prefs.getString(_keyUserName) ?? 'Водитель',
       'city': prefs.getString(_keyUserCity) ?? 'Москва',
       'car_clearance': prefs.getInt(_keyUserClearance) ?? 0,
@@ -681,19 +765,28 @@ class ApiService {
     final refreshToken = prefs.getString(_keyRefreshToken);
     if (refreshToken != null && refreshToken.isNotEmpty) {
       try {
-        await http.post(
+        await _client.post(
           Uri.parse('$baseUrl/auth/logout'),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({'refresh_token': refreshToken}),
-        );
+        ).timeout(_httpTimeout);
       } catch (_) {}
     }
-    await prefs.remove(_keyAccessToken);
-    await prefs.remove(_keyRefreshToken);
-    await prefs.remove(_keyUserPhone);
-    await prefs.remove(_keyUserName);
-    await prefs.remove(_keyUserCity);
-    await prefs.remove(_keyUserClearance);
+    await _clearSession();
+  }
+
+  static Future<void> _clearSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    for (final key in [
+      _keyAccessToken,
+      _keyRefreshToken,
+      _keyUserPhone,
+      _keyUserName,
+      _keyUserCity,
+      _keyUserClearance,
+    ]) {
+      await prefs.remove(key);
+    }
   }
 
   /// Серверное удаление аккаунта с анонимизацией телеметрии
@@ -702,13 +795,13 @@ class ApiService {
       final token = await getAccessToken();
       if (token == null || token.isEmpty) return false;
 
-      final res = await http.delete(
+      final res = await _client.delete(
         Uri.parse('$baseUrl/auth/me'),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $token',
         },
-      );
+      ).timeout(_httpTimeout);
       if (res.statusCode == 200) {
         await logout();
         return true;
@@ -729,7 +822,7 @@ class ApiService {
         return false;
       }
 
-      final response = await http.post(
+      final response = await _client.post(
         Uri.parse('$baseUrl/telemetry/distance'),
         headers: {
           'Content-Type': 'application/json',
@@ -738,8 +831,12 @@ class ApiService {
         body: jsonEncode({
           'distance_meters': meters,
         }),
-      );
-      return response.statusCode == 200;
+      ).timeout(_httpTimeout);
+      if (response.statusCode != 200) return false;
+      // Для гостя/невалидного токена сервер отвечает 200, но ничего не пишет (total = 0).
+      final data = jsonDecode(response.body);
+      final total = (data['total_distance_meters'] as num?)?.toDouble() ?? 0.0;
+      return total > 0;
     } catch (e) {
       debugPrint("Ошибка отправки дистанции на сервер: $e");
       return false;
@@ -770,7 +867,9 @@ class ApiService {
     }
   }
 
-  static Future<bool> sendDefect({
+  /// Без токена не отправляем: событие осталось бы «гостевым» и не попало бы в профиль.
+  /// Статус 401 оставляет его в очереди до входа в аккаунт.
+  static Future<DefectSendResult> sendDefectStatus({
     required double lat,
     required double lon,
     required double speed,
@@ -778,17 +877,21 @@ class ApiService {
     String defectType = 'pothole',
     String infrastructureType = 'road',
     List<Map<String, dynamic>> trajectory = const [],
+    int? eventTimeMs,
+    String? clientEventId,
+    double? headingDeg,
+    double? accuracyM,
   }) async {
     try {
       final token = await getAccessToken();
-      final headers = <String, String>{'Content-Type': 'application/json'};
-      if (token != null && token.isNotEmpty) {
-        headers['Authorization'] = 'Bearer $token';
-      }
+      if (token == null || token.isEmpty) return const DefectSendResult(401);
 
-      final response = await http.post(
+      final response = await _client.post(
         Uri.parse(apiUrl),
-        headers: headers,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
         body: jsonEncode({
           'latitude': lat,
           'longitude': lon,
@@ -797,22 +900,29 @@ class ApiService {
           'defect_type': defectType,
           'infrastructure_type': infrastructureType,
           'trajectory': trajectory,
+          'event_time_ms': ?eventTimeMs,
+          'client_event_id': ?clientEventId,
+          'heading_deg': ?headingDeg,
+          'accuracy_m': ?accuracyM,
         }),
-      );
+      ).timeout(_httpTimeout);
 
-      if (response.statusCode == 200) {
-        await incrementDefectsCount(1);
-        return true;
-      }
-      return false;
+      if (response.statusCode != 200) return DefectSendResult(response.statusCode);
+
+      var duplicate = false;
+      try {
+        duplicate = (jsonDecode(response.body) as Map)['duplicate'] == true;
+      } catch (_) {}
+      if (!duplicate) await incrementDefectsCount(1);
+      return DefectSendResult(200, duplicate: duplicate);
     } catch (e) {
-      return false;
+      return const DefectSendResult(0);
     }
   }
 
   static Future<List<Map<String, dynamic>>> getBumps() async {
     try {
-      final response = await http.get(Uri.parse(apiUrl));
+      final response = await _client.get(Uri.parse(apiUrl)).timeout(_httpTimeout);
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         return (data as List).cast<Map<String, dynamic>>();

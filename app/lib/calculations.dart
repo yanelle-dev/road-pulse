@@ -41,6 +41,18 @@ bool isCountableStep(double distanceM, double accuracyM) {
   return distanceM >= kOdometerMinStepM && distanceM < kOdometerMaxStepM;
 }
 
+/// Серьёзность дефекта: 1 — ровно, 2 — заметно, 3 — жёстко.
+/// Сервер присылает `severity`; для ответов старого сервера считаем по нормализованной силе.
+int defectSeverity(Map<String, dynamic> defect) {
+  final severity = defect['severity'];
+  if (severity is num) return severity.toInt().clamp(1, 3);
+
+  final force = ((defect['max_force'] ?? defect['bump_force'] ?? 0) as num).toDouble();
+  if (force > kSeverityHard) return 3;
+  if (force > kSeverityMedium) return 2;
+  return 1;
+}
+
 /// Безопасный парсинг даты дефекта с переводом в локальный часовой пояс
 DateTime parseDefectDate(dynamic rawDate) {
   if (rawDate != null) {

@@ -7,6 +7,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Необходимо задать POSTGRES_PASSWORD в файле .env}
       POSTGRES_DB: ${POSTGRES_DB:-road_pulse_db}
+    ports:
+      # Только для локальной разработки (go run на хосте); наружу порт не открываем.
+      - '127.0.0.1:5432:5432'
     volumes:
       - road_pulse_data:/var/lib/postgresql/data
     networks:
@@ -22,8 +25,10 @@ services:
       - PORT=${PORT:-8000}
       - OSRM_BASE=${OSRM_BASE:-https://router.project-osrm.org}
       - JWT_SECRET=${JWT_SECRET:?Необходимо задать JWT_SECRET в файле .env}
-      - SMS_API_KEY=${SMS_API_KEY:-}
-      - SMS_SENDER=${SMS_SENDER:-RoadPulse}
+      - SMS_GATE_URL=${SMS_GATE_URL:-}
+      - SMS_GATE_USER=${SMS_GATE_USER:-}
+      - SMS_GATE_PASSWORD=${SMS_GATE_PASSWORD:-}
+      - TRUST_PROXY=${TRUST_PROXY:-false}
     ports:
       - '8001:8000'
     depends_on:

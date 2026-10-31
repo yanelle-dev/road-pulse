@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../achievement_service.dart';
 import '../api_service.dart';
 import '../app_theme.dart';
+import '../widgets/theme_mode_selector.dart';
 import 'auth_screen.dart';
 
 class AccountScreen extends StatefulWidget {
@@ -45,7 +46,7 @@ class _AccountScreenState extends State<AccountScreen> {
     } catch (_) {
       if (mounted) {
         setState(() {
-          _appVersionString = 'Дорожный пульс 1.3.0 · сборка 18';
+          _appVersionString = 'Дорожный пульс 2.0.0 · сборка 19';
         });
       }
     }
@@ -339,7 +340,7 @@ class _AccountScreenState extends State<AccountScreen> {
                 _buildRowItem(
                   colors: colors,
                   icon: Icons.phone_android_rounded,
-                  title: _profile['phone'] ?? '+7 999 123-45-67',
+                  title: _profile['phone'] ?? 'Номер не указан',
                   subtitle: "Номер подтверждён",
                   trailing: Icon(
                     Icons.chevron_right_rounded,
@@ -361,6 +362,8 @@ class _AccountScreenState extends State<AccountScreen> {
                 ),
               ],
             ),
+            _buildSectionHeader("ВНЕШНИЙ ВИД", colors),
+            const ThemeModeSelector(),
             _buildSectionHeader("ЗАПИСЬ", colors),
             _buildGroupCard(
               colors: colors,

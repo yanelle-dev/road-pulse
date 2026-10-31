@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"road_pulse/backend/internal/models"
@@ -17,68 +16,34 @@ func NewTripHandler(s *service.TripService) *TripHandler {
 }
 
 func (h *TripHandler) StartTrip(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	userID, ok := r.Context().Value(ContextUserIDKey).(string)
-	if !ok || userID == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Требуется авторизация"})
-		return
-	}
-
-	tripID, err := h.service.StartTrip(r.Context(), userID)
+	tripID, err := h.service.StartTrip(r.Context(), userIDFrom(r))
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(models.StartTripResponse{TripID: tripID})
+	respondJSON(w, http.StatusOK, models.StartTripResponse{TripID: tripID})
 }
 
 func (h *TripHandler) FinishTrip(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	userID, ok := r.Context().Value(ContextUserIDKey).(string)
-	if !ok || userID == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Требуется авторизация"})
-		return
-	}
-
 	var payload models.FinishTripPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.TripID <= 0 {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Некорректный payload завершения поездки"})
+	if err := decodeJSON(w, r, &payload); err != nil || payload.TripID <= 0 {
+		respondDetail(w, http.StatusBadRequest, "Некорректный payload завершения поездки")
 		return
 	}
 
-	trip, err := h.service.FinishTrip(r.Context(), userID, &payload)
+	trip, err := h.service.FinishTrip(r.Context(), userIDFrom(r), &payload)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(trip)
+	respondJSON(w, http.StatusOK, trip)
 }
 
 func (h *TripHandler) GetLastTrip(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	userID, ok := r.Context().Value(ContextUserIDKey).(string)
-	if !ok || userID == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Требуется авторизация"})
-		return
-	}
-
-	trip, err := h.service.GetLastTrip(r.Context(), userID)
+	trip, err := h.service.GetLastTrip(r.Context(), userIDFrom(r))
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(trip)
+	respondJSON(w, http.StatusOK, trip)
 }

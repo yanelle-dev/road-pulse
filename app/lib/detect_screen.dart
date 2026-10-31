@@ -7,7 +7,9 @@ import 'package:sensors_plus/sensors_plus.dart';
 
 import 'api_service.dart';
 import 'constants.dart';
+import 'detection.dart';
 import 'app_theme.dart';
+import 'gps.dart';
 import 'sensor_service.dart';
 import 'widgets/onboarding_panel.dart';
 import 'fresh_prefs.dart';
@@ -23,13 +25,17 @@ class _DetectScreenState extends State<DetectScreen> {
   bool _isActive = false;
 
   StreamSubscription<Position>? _positionStream;
-  StreamSubscription<UserAccelerometerEvent>? _accelStream;
+  StreamSubscription<AccelerometerEvent>? _accelStream;
 
   double _currentSpeed = 0.0;
   double _tripDistanceMeters = 0.0;
 
   final int _maxDataPoints = 60;
   List<double> _accelData = [];
+
+  final GravityFilter _gravity = GravityFilter();
+  double _latestVertical = 0.0;
+  Timer? _scopeTimer;
 
   @override
   void initState() {
@@ -51,6 +57,7 @@ class _DetectScreenState extends State<DetectScreen> {
     FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
     _positionStream?.cancel();
     _accelStream?.cancel();
+    _scopeTimer?.cancel();
     super.dispose();
   }
 
@@ -71,10 +78,7 @@ class _DetectScreenState extends State<DetectScreen> {
 
   void _initSensors() {
     _positionStream = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 1, // Чувствительность 1 метр
-      ),
+      locationSettings: gpsStreamSettings(distanceFilter: 1),
     ).listen((Position position) {
       if (!mounted) return;
 
@@ -85,15 +89,25 @@ class _DetectScreenState extends State<DetectScreen> {
       });
     });
 
-    _accelStream = userAccelerometerEventStream().listen((
-      UserAccelerometerEvent event,
-    ) {
-      if (mounted) {
-        setState(() {
-          _accelData.removeAt(0);
-          _accelData.add(event.z);
-        });
-      }
+    // Тот же период, что и у фонового изолята: sensors_plus применяет
+    // последний заданный период ко всем слушателям потока.
+    _accelStream = accelerometerEventStream(
+      samplingPeriod: const Duration(milliseconds: 10),
+    ).listen((AccelerometerEvent e) {
+      final s = _gravity.update(e.x, e.y, e.z, DateTime.now().microsecondsSinceEpoch);
+      if (s == null) return;
+      // Пик за интервал отрисовки, чтобы короткий удар не терялся.
+      if (s.vertical.abs() > _latestVertical.abs()) _latestVertical = s.vertical;
+    }, onError: (_) {});
+
+    // Перерисовка осциллографа ~15 кадров/с вместо 100 setState в секунду.
+    _scopeTimer = Timer.periodic(const Duration(milliseconds: 66), (_) {
+      if (!mounted) return;
+      setState(() {
+        _accelData.removeAt(0);
+        _accelData.add(_latestVertical);
+        _latestVertical = 0.0;
+      });
     });
   }
 
@@ -404,6 +418,7 @@ class _DetectScreenState extends State<DetectScreen> {
 
   Widget _buildScope(PolotnoColors colors) {
     final double currentZ = _accelData.isNotEmpty ? _accelData.last : 0.0;
+    final double threshold = bumpThresholdFor(_currentSpeed);
 
     return Container(
       height: 140,
@@ -420,7 +435,7 @@ class _DetectScreenState extends State<DetectScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                "ВИБРАЦИЯ · ОСЬ Z",
+                "ВИБРАЦИЯ · ВЕРТИКАЛЬ",
                 style: TextStyle(
                   fontFamily: AppTheme.fontMono,
                   fontSize: 9.5,
@@ -430,12 +445,12 @@ class _DetectScreenState extends State<DetectScreen> {
                 ),
               ),
               Text(
-                "${currentZ.abs().toStringAsFixed(1)} g",
+                "${currentZ.abs().toStringAsFixed(1)} м/с²",
                 style: TextStyle(
                   fontFamily: AppTheme.fontMono,
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
-                  color: currentZ.abs() >= 7.0 ? colors.s3 : colors.ink,
+                  color: currentZ.abs() >= threshold ? colors.s3 : colors.ink,
                 ),
               ),
             ],
@@ -446,6 +461,7 @@ class _DetectScreenState extends State<DetectScreen> {
               size: Size.infinite,
               painter: PolotnoScopePainter(
                 data: _accelData,
+                threshold: threshold,
                 lineColor: colors.s1,
                 gridColor: colors.edge,
                 alertColor: colors.s3,
@@ -619,12 +635,14 @@ class _DetectScreenState extends State<DetectScreen> {
 
 class PolotnoScopePainter extends CustomPainter {
   final List<double> data;
+  final double threshold;
   final Color lineColor;
   final Color gridColor;
   final Color alertColor;
 
   PolotnoScopePainter({
     required this.data,
+    required this.threshold,
     required this.lineColor,
     required this.gridColor,
     required this.alertColor,
@@ -633,15 +651,15 @@ class PolotnoScopePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final double midY = size.height / 2;
-    const double maxG = 10.0;
+    const double maxG = 15.0;
 
     final gridPaint = Paint()
       ..color = gridColor
       ..strokeWidth = 1
       ..style = PaintingStyle.stroke;
 
-    final double yThresholdTop = midY - (7.0 / maxG) * (midY - 4);
-    final double yThresholdBottom = midY + (7.0 / maxG) * (midY - 4);
+    final double yThresholdTop = midY - (threshold / maxG) * (midY - 4);
+    final double yThresholdBottom = midY + (threshold / maxG) * (midY - 4);
 
     _drawDashedLine(canvas, Offset(0, yThresholdTop), Offset(size.width, yThresholdTop), gridPaint);
     _drawDashedLine(canvas, Offset(0, yThresholdBottom), Offset(size.width, yThresholdBottom), gridPaint);
@@ -672,7 +690,7 @@ class PolotnoScopePainter extends CustomPainter {
     canvas.drawPath(path, linePaint);
 
     final double lastVal = data.last;
-    if (lastVal.abs() >= 4.0) {
+    if (lastVal.abs() >= threshold) {
       final dotPaint = Paint()..color = alertColor;
       final double dotY = midY - (lastVal.clamp(-maxG, maxG) / maxG) * (midY - 6);
       canvas.drawCircle(Offset(size.width - 2, dotY), 4, dotPaint);

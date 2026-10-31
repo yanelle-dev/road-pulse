@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
-import 'package:geocoding/geocoding.dart';
 import 'package:latlong2/latlong.dart' hide Path;
+import 'address_service.dart';
 import 'api_service.dart';
 import 'app_theme.dart';
-import 'constants.dart';
+import 'calculations.dart';
 
 class PotholeDetailsScreen extends StatefulWidget {
   final Map<String, dynamic>? defect;
@@ -42,19 +42,13 @@ class _PotholeDetailsScreenState extends State<PotholeDetailsScreen> {
   }
 
   Future<void> _resolveAddress() async {
-    final lat = _lat;
-    final lon = _lon;
-    if (lat == null || lon == null) return;
+    final defect = widget.defect;
+    if (defect == null) return;
 
-    try {
-      final placemarks = await Geocoding().placemarkFromCoordinates(lat, lon);
-      if (placemarks.isNotEmpty && mounted) {
-        final p = placemarks.first;
-        setState(() {
-          _resolvedAddress = "${p.street ?? 'Улица'}, ${p.locality ?? 'Москва'}";
-        });
-      }
-    } catch (_) {}
+    final address = await AddressService.resolve(defect);
+    if (address != null && mounted) {
+      setState(() => _resolvedAddress = address);
+    }
   }
 
   Future<void> _showAddCommentDialog(PolotnoColors colors) async {
@@ -165,22 +159,11 @@ class _PotholeDetailsScreenState extends State<PotholeDetailsScreen> {
       );
     }
 
-    Color levelColor = colors.s1;
-    Color levelBg = colors.s1Soft;
-    String levelText = "РОВНО";
-    String sizeStr = "S";
-
-    if (force > kSeverityHard) {
-      levelColor = colors.s3;
-      levelBg = colors.s3Soft;
-      levelText = "ЖЁСТКО";
-      sizeStr = "L";
-    } else if (force > kSeverityMedium) {
-      levelColor = colors.s2;
-      levelBg = colors.s2Soft;
-      levelText = "ЗАМЕТНО";
-      sizeStr = "M";
-    }
+    final severity = defectSeverity(widget.defect!);
+    final Color levelColor = severity == 3 ? colors.s3 : (severity == 2 ? colors.s2 : colors.s1);
+    final Color levelBg = severity == 3 ? colors.s3Soft : (severity == 2 ? colors.s2Soft : colors.s1Soft);
+    final String levelText = severity == 3 ? "ЖЁСТКО" : (severity == 2 ? "ЗАМЕТНО" : "РОВНО");
+    final String sizeStr = severity == 3 ? "L" : (severity == 2 ? "M" : "S");
 
     final title = _defectType == 'rough_road'
         ? "Неровная дорога (тряска / колея)"
@@ -482,7 +465,7 @@ class _PotholeDetailsScreenState extends State<PotholeDetailsScreen> {
                           style: TextStyle(color: colors.ink, fontWeight: FontWeight.w700),
                         ),
                         TextSpan(
-                          text: "Правило: ≥2 водителя или ≥3 попадания (зафиксировано: $uniqueUsers вод., $totalHits ударов).",
+                          text: "Правило: ≥2 водителя или попадания в разные дни (зафиксировано: $uniqueUsers вод., $totalHits ударов).",
                         ),
                       ]
                     : [
@@ -491,7 +474,7 @@ class _PotholeDetailsScreenState extends State<PotholeDetailsScreen> {
                           style: TextStyle(color: colors.markInk, fontWeight: FontWeight.w700),
                         ),
                         TextSpan(
-                          text: "Нужно: ≥2 водителя или ≥3 попадания (сейчас: $uniqueUsers вод., $totalHits ударов).",
+                          text: "Нужно: ≥2 водителя или 3 попадания в разные дни (сейчас: $uniqueUsers вод., $totalHits ударов).",
                         ),
                       ],
               ),

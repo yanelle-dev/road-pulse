@@ -13,7 +13,7 @@ func TestNormalizePhone(t *testing.T) {
 		expected string
 	}{
 		{input: "+7 (999) 123-45-67", expected: "+79991234567"},
-		{input: "89991234567", expected: "+89991234567"},
+		{input: "89991234567", expected: "+79991234567"},
 		{input: "+79991234567", expected: "+79991234567"},
 		{input: " +7-999-000-11-22 ", expected: "+79990001122"},
 	}

@@ -1,9 +1,8 @@
 package handler
 
 import (
-	"encoding/json"
-	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"road_pulse/backend/internal/models"
@@ -19,135 +18,116 @@ func NewTelemetryHandler(s *service.TelemetryService) *TelemetryHandler {
 }
 
 func (h *TelemetryHandler) PostTelemetry(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
 	var payload models.TelemetryPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Некорректный JSON"})
+	if err := decodeJSON(w, r, &payload); err != nil {
+		respondDetail(w, http.StatusBadRequest, "Некорректный JSON")
 		return
 	}
 
 	if payload.SpeedKMH < service.MinSpeedKMH {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Speed too low"})
+		respondDetail(w, http.StatusBadRequest, "Speed too low")
 		return
 	}
 
-	if authUserID, ok := r.Context().Value(ContextUserIDKey).(string); ok && authUserID != "" {
-		payload.UserID = authUserID
-	} else if payload.UserID == "" {
-		payload.UserID = "anonymous"
+	// Токен прислан, но не принят (истёк/подделан): запись «как гость» засчитала бы яму
+	// не тому пользователю и дала бы ложное подтверждение. Клиент на 401 обновляет токен и повторяет.
+	uid := userIDFrom(r)
+	if uid == "" && strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+		respondDetail(w, http.StatusUnauthorized, "Недействительный токен")
+		return
 	}
+	if uid == "" {
+		uid = "anonymous"
+	}
+	payload.UserID = uid
 
 	resp, err := h.service.SaveTelemetry(r.Context(), &payload)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	respondJSON(w, http.StatusOK, resp)
 }
 
 func (h *TelemetryHandler) GetTelemetry(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
 	clusters, err := h.service.GetClusters(r.Context())
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(clusters)
+	respondJSON(w, http.StatusOK, clusters)
 }
 
 func (h *TelemetryHandler) PostDistance(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
 	var payload models.DistancePayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Некорректный JSON"})
+	if err := decodeJSON(w, r, &payload); err != nil {
+		respondDetail(w, http.StatusBadRequest, "Некорректный JSON")
 		return
 	}
 
 	if payload.DistanceMeters <= 0 {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Дистанция должна быть больше 0"})
+		respondDetail(w, http.StatusBadRequest, "Дистанция должна быть больше 0")
 		return
 	}
 
-	userID := "anonymous"
-	if authUserID, ok := r.Context().Value(ContextUserIDKey).(string); ok && authUserID != "" {
-		userID = authUserID
+	userID := userIDFrom(r)
+	// Токен прислан, но не принят (истёк/подделан): раньше это молча превращалось в гостя
+	// с ответом 200, и клиент стирал накопленный пробег. Теперь — явный 401.
+	if userID == "" && strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+		respondDetail(w, http.StatusUnauthorized, "Недействительный токен")
+		return
+	}
+	if userID == "" {
+		userID = "anonymous"
 	}
 
 	resp, err := h.service.RecordDistance(r.Context(), userID, payload.DistanceMeters)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	respondJSON(w, http.StatusOK, resp)
 }
 
 func (h *TelemetryHandler) GetComments(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	clusterIDStr := r.URL.Query().Get("cluster_id")
-	if clusterIDStr == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Параметр cluster_id обязателен"})
+	raw := r.URL.Query().Get("cluster_id")
+	if raw == "" {
+		respondDetail(w, http.StatusBadRequest, "Параметр cluster_id обязателен")
 		return
 	}
 
-	var clusterID int64
-	if _, err := fmt.Sscanf(clusterIDStr, "%d", &clusterID); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Некорректный cluster_id"})
+	clusterID, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || clusterID <= 0 {
+		respondDetail(w, http.StatusBadRequest, "Некорректный cluster_id")
 		return
 	}
 
 	comments, err := h.service.GetComments(r.Context(), clusterID)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(comments)
+	respondJSON(w, http.StatusOK, comments)
 }
 
 func (h *TelemetryHandler) PostComment(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	userID, ok := r.Context().Value(ContextUserIDKey).(string)
-	if !ok || userID == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Требуется авторизация"})
+	userID := userIDFrom(r)
+	if userID == "" {
+		respondDetail(w, http.StatusUnauthorized, "Требуется авторизация")
 		return
 	}
 
 	var payload models.CreateCommentPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.ClusterID <= 0 || strings.TrimSpace(payload.Text) == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Передайте корректный cluster_id и текст комментария"})
+	if err := decodeJSON(w, r, &payload); err != nil || payload.ClusterID <= 0 || strings.TrimSpace(payload.Text) == "" {
+		respondDetail(w, http.StatusBadRequest, "Передайте корректный cluster_id и текст комментария")
 		return
 	}
 
-	// Защита от подмены автора: имя пользователя извлекается из профиля users по токену в БД
+	// Имя автора берётся из профиля в БД, поле author_name из тела игнорируется.
 	comment, err := h.service.AddComment(r.Context(), payload.ClusterID, userID, "", payload.Text)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(comment)
+	respondJSON(w, http.StatusOK, comment)
 }

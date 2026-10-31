@@ -5,6 +5,7 @@ import 'api_service.dart';
 import 'app_theme.dart';
 import 'main_scaffold.dart';
 import 'screens/auth_screen.dart';
+import 'theme_store.dart';
 
 /// Глобальный нотификатор для мгновенного переключения темы (Light/Dark/System)
 final ValueNotifier<ThemeMode> themeModeNotifier = ValueNotifier(
@@ -14,6 +15,9 @@ final ValueNotifier<ThemeMode> themeModeNotifier = ValueNotifier(
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   FlutterForegroundTask.initCommunicationPort();
+
+  themeModeNotifier.value = await ThemeStore.load();
+  themeModeNotifier.addListener(() => ThemeStore.save(themeModeNotifier.value));
 
   // Логирование холодного старта приложения
   await ApiService.recordAppOpen();
@@ -51,13 +55,15 @@ class AuthGate extends StatefulWidget {
 }
 
 class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
-  late Future<bool> _authFuture;
+  /// `null` — проверка ещё идёт. Состояние, а не FutureBuilder: повторная проверка при возврате в приложение
+  /// не должна заменять интерфейс спиннером и сбрасывать открытые экраны.
+  bool? _authenticated;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _authFuture = ApiService.isAuthenticated();
+    _checkSession();
   }
 
   @override
@@ -66,39 +72,33 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  Future<void> _checkSession() async {
+    final ok = await ApiService.isAuthenticated();
+    if (mounted && ok != _authenticated) setState(() => _authenticated = ok);
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Фиксация возврата в приложение из фонового режима
-    if (state == AppLifecycleState.resumed) {
-      ApiService.recordAppOpen();
-    }
+    if (state != AppLifecycleState.resumed) return;
+    // Фиксация возврата в приложение из фонового режима; заодно ловим сессию,
+    // которую фоновая служба сбросила из-за отозванного refresh-токена.
+    ApiService.recordAppOpen();
+    _checkSession();
   }
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
 
-    return FutureBuilder<bool>(
-      future: _authFuture,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return Scaffold(
-            backgroundColor: colors.voidBg,
-            body: Center(
-              child: CircularProgressIndicator(
-                strokeWidth: 2.5,
-                color: colors.mark,
-              ),
-            ),
-          );
-        }
-
-        if (snapshot.data == true) {
-          return const MainScaffold();
-        }
-
-        return const AuthScreen();
-      },
-    );
+    return switch (_authenticated) {
+      null => Scaffold(
+        backgroundColor: colors.voidBg,
+        body: Center(
+          child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.mark),
+        ),
+      ),
+      true => const MainScaffold(),
+      false => const AuthScreen(),
+    };
   }
 }

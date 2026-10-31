@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"road_pulse/backend/internal/models"
@@ -17,171 +16,103 @@ func NewAuthHandler(s *service.AuthService) *AuthHandler {
 }
 
 func (h *AuthHandler) RequestCode(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	var payload models.RequestCodePayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.Phone == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Укажите корректный номер телефона"})
+	if err := decodeJSON(w, r, &payload); err != nil || payload.Phone == "" {
+		respondDetail(w, http.StatusBadRequest, "Укажите корректный номер телефона")
 		return
 	}
 
-	code, retryAfter, err := h.service.RequestCode(r.Context(), payload.Phone)
+	retryAfter, err := h.service.RequestCode(r.Context(), payload.Phone)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":      "code_sent",
-		"retry_after": retryAfter,
-		"code":        code,
-	})
+	respondJSON(w, http.StatusOK, map[string]any{"status": "code_sent", "retry_after": retryAfter})
 }
 
 func (h *AuthHandler) VerifyCode(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	var payload models.VerifyCodePayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.Phone == "" || payload.Code == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Передайте номер телефона и код"})
+	if err := decodeJSON(w, r, &payload); err != nil || payload.Phone == "" || payload.Code == "" {
+		respondDetail(w, http.StatusBadRequest, "Передайте номер телефона и код")
 		return
 	}
 
 	resp, err := h.service.VerifyCode(r.Context(), payload.Phone, payload.Code)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	respondJSON(w, http.StatusOK, resp)
 }
 
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	var payload models.RefreshTokenPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.RefreshToken == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Передайте refresh_token"})
+	if err := decodeJSON(w, r, &payload); err != nil || payload.RefreshToken == "" {
+		respondDetail(w, http.StatusBadRequest, "Передайте refresh_token")
 		return
 	}
 
 	resp, err := h.service.Refresh(r.Context(), payload.RefreshToken)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	respondJSON(w, http.StatusOK, resp)
 }
 
 func (h *AuthHandler) GetMe(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	userID, ok := r.Context().Value(ContextUserIDKey).(string)
-	if !ok || userID == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Требуется авторизация"})
-		return
-	}
-
-	user, err := h.service.GetProfile(r.Context(), userID)
+	user, err := h.service.GetProfile(r.Context(), userIDFrom(r))
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(user)
+	respondJSON(w, http.StatusOK, user)
 }
 
 func (h *AuthHandler) UpdateMe(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	userID, ok := r.Context().Value(ContextUserIDKey).(string)
-	if !ok || userID == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Требуется авторизация"})
-		return
-	}
-
 	var payload models.UpdateProfilePayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Некорректный JSON"})
+	if err := decodeJSON(w, r, &payload); err != nil {
+		respondDetail(w, http.StatusBadRequest, "Некорректный JSON")
 		return
 	}
 
-	user, err := h.service.UpdateProfile(r.Context(), userID, &payload)
+	user, err := h.service.UpdateProfile(r.Context(), userIDFrom(r), &payload)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(user)
+	respondJSON(w, http.StatusOK, user)
 }
 
 func (h *AuthHandler) DeleteMe(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	userID, ok := r.Context().Value(ContextUserIDKey).(string)
-	if !ok || userID == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Требуется авторизация"})
+	if err := h.service.DeleteAccount(r.Context(), userIDFrom(r)); err != nil {
+		respondError(w, err)
 		return
 	}
-
-	if err := h.service.DeleteAccount(r.Context(), userID); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "account_deleted"})
+	respondJSON(w, http.StatusOK, map[string]string{"status": "account_deleted"})
 }
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	var payload models.RefreshTokenPayload
-	_ = json.NewDecoder(r.Body).Decode(&payload)
+	_ = decodeJSON(w, r, &payload)
 
 	if payload.RefreshToken != "" {
 		_ = h.service.Logout(r.Context(), payload.RefreshToken)
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "logged_out"})
+	respondJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
 }
 
 func (h *AuthHandler) SyncStats(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	userID, ok := r.Context().Value(ContextUserIDKey).(string)
-	if !ok || userID == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Требуется авторизация"})
-		return
-	}
-
 	var payload models.SyncStatsPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Некорректный JSON"})
+	if err := decodeJSON(w, r, &payload); err != nil {
+		respondDetail(w, http.StatusBadRequest, "Некорректный JSON")
 		return
 	}
 
-	user, err := h.service.SyncStats(r.Context(), userID, payload.StreakDays, payload.UnlockedAchievements)
+	user, err := h.service.SyncStats(r.Context(), userIDFrom(r), payload.StreakDays, payload.UnlockedAchievements)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"detail": err.Error()})
+		respondError(w, err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(user)
+	respondJSON(w, http.StatusOK, user)
 }
