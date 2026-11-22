@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:math' show Random, max, min;
 import 'package:flutter/foundation.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'achievement_service.dart';
@@ -29,10 +31,12 @@ class VerifyResult {
   });
 }
 
-/// Модель одного дня для теплокарты активности
+
 class DayActivity {
   final DateTime date;
+
   final int count;
+  final double meters;
   final int level;
   final bool isToday;
   final bool isFuture;
@@ -40,23 +44,24 @@ class DayActivity {
   const DayActivity({
     required this.date,
     required this.count,
+    this.meters = 0.0,
     required this.level,
     required this.isToday,
     required this.isFuture,
   });
 }
 
-/// Агрегированные данные активности за 28 дней
+
 class UserActivityData {
   final List<DayActivity> days;
   final int streakDays;
-  final int totalVisits;
+  final double totalMeters;
   final int activeDays;
 
   const UserActivityData({
     required this.days,
     required this.streakDays,
-    required this.totalVisits,
+    required this.totalMeters,
     required this.activeDays,
   });
 
@@ -73,13 +78,13 @@ class UserActivityData {
         ),
       ),
       streakDays: 0,
-      totalVisits: 0,
+      totalMeters: 0.0,
       activeDays: 0,
     );
   }
 }
 
-/// Данные завершённой поездки пользователя
+
 class TripData {
   final int id;
   final DateTime startedAt;
@@ -115,7 +120,7 @@ class TripData {
   }
 }
 
-/// Комментарий водителя к дефекту
+
 class DefectComment {
   final int id;
   final int clusterId;
@@ -142,7 +147,7 @@ class DefectComment {
   }
 }
 
-/// Пользовательская статистика для экрана профиля
+
 class UserStats {
   final double totalKm;
   final int totalDefects;
@@ -151,6 +156,8 @@ class UserStats {
   final int unlockedAchievements;
   final int streakDays;
   final int communityPercentile;
+  final int potholes;
+  final int roughRoads;
 
   const UserStats({
     required this.totalKm,
@@ -160,6 +167,8 @@ class UserStats {
     required this.unlockedAchievements,
     required this.streakDays,
     this.communityPercentile = 0,
+    this.potholes = 0,
+    this.roughRoads = 0,
   });
 
   factory UserStats.empty() {
@@ -175,11 +184,11 @@ class UserStats {
   }
 }
 
-/// Итог отправки дефекта: HTTP-статус (0 — сеть/таймаут) и признак повтора.
+
 class DefectSendResult {
   final int status;
 
-  /// Сервер уже знает эту яму (повтор события или тот же проезд): в счётчик она не идёт.
+
   final bool duplicate;
 
   const DefectSendResult(this.status, {this.duplicate = false});
@@ -188,7 +197,7 @@ class DefectSendResult {
 class ApiService {
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://64.188.74.105:8001/api/v1',
+    defaultValue: 'http://194.76.172.75:8001/api/v1',
   );
   static const String apiUrl = '$baseUrl/telemetry';
 
@@ -199,12 +208,12 @@ class ApiService {
 
   static const Duration _httpTimeout = Duration(seconds: 12);
 
-  /// Общий клиент: `http.post(...)` открывал новое соединение на каждый запрос.
+
   static final http.Client _client = http.Client();
   static Future<bool>? _refreshInFlight;
 
-  /// Access-токен с автообновлением: если он истекает в ближайшие 60 с,
-  /// меняем его по refresh-токену (раньше refresh нигде не использовался).
+
+
   static Future<String?> getValidAccessToken() async {
     final prefs = await freshPrefs();
     final token = prefs.getString(_keyAccessToken);
@@ -263,10 +272,10 @@ class ApiService {
         await p.setString(_keyRefreshToken, refresh);
         return true;
       }
-      // refresh ротируется: другой изолят мог уже обновить пару.
+
       final p2 = await freshPrefs();
       final rotatedElsewhere = p2.getString(_keyAccessToken) != oldAccess;
-      // Refresh отозван или истёк: токен «лежит» в хранилище, но пользователь уже не авторизован.
+
       if (!rotatedElsewhere && res.statusCode == 401) await _clearSession();
       return rotatedElsewhere;
     } catch (_) {
@@ -277,7 +286,6 @@ class ApiService {
   static const String _keyUserName = 'auth_user_name';
   static const String _keyUserCity = 'auth_user_city';
   static const String _keyUserClearance = 'auth_user_clearance';
-  static const String _keyActivityVisits = 'user_activity_visits';
   static const String _keyDefectsCount = 'user_defects_count';
 
   static void addLog(String raw) {
@@ -295,7 +303,7 @@ class ApiService {
     logs.value = [LogEntry(time, message, kind), ...logs.value];
   }
 
-  // --- МЕТОДЫ УЧЁТА ДЕФЕКТОВ И РАСЧЁТА РЕЙТИНГА ---
+
 
   static Future<int> getDefectsCount() async {
     final prefs = await freshPrefs();
@@ -310,12 +318,14 @@ class ApiService {
     await AchievementService.syncDefectsProgress(next);
   }
 
-/// Получение сводной статистики: сервер как единственный источник правды
+
   static Future<UserStats> getUserStats() async {
     try {
       final token = await getAccessToken();
-      final activity = await getActivityData();
-      final streakDays = activity.streakDays;
+      final prefs = await freshPrefs();
+      var streakDays = _activityFromCache(prefs).streakDays;
+      int potholes = 0;
+      int roughRoads = 0;
 
       final achievements = await AchievementService.getAchievements();
       final unlockedAchievements = achievements.where((a) => a.isUnlocked).length;
@@ -329,7 +339,7 @@ class ApiService {
 
       if (token != null && token.isNotEmpty) {
         try {
-          // Один атомарный запрос: передаёт серию/награды и сразу возвращает эталонную статистику
+
           final res = await _client.post(
             Uri.parse('$baseUrl/auth/sync-stats'),
             headers: {
@@ -337,7 +347,6 @@ class ApiService {
               'Authorization': 'Bearer $token',
             },
             body: jsonEncode({
-              'streak_days': streakDays,
               'unlocked_achievements': unlockedAchievements,
             }),
           ).timeout(_httpTimeout);
@@ -345,7 +354,7 @@ class ApiService {
           if (res.statusCode == 200) {
             final data = jsonDecode(res.body);
             final serverMeters = (data['total_distance_meters'] ?? 0.0).toDouble();
-            final prefs = await freshPrefs();
+            await prefs.reload();
             final pendingMeters = prefs.getDouble(kKeyPendingDistanceMeters) ?? 0.0;
 
             totalKm = (serverMeters + pendingMeters) / 1000.0;
@@ -353,12 +362,16 @@ class ApiService {
             rating = (data['rating'] ?? 0) as int;
             savedSuspensions = (data['saved_suspensions'] ?? 0) as int;
             communityPercentile = ((data['community_percentile'] ?? 0) as num).toInt();
+            streakDays = (data['streak_days'] as num?)?.toInt() ?? streakDays;
+            potholes = (data['pothole_count'] as num?)?.toInt() ?? 0;
+            roughRoads = (data['rough_road_count'] as num?)?.toInt() ?? 0;
+            await _cacheActivity(prefs, data as Map<String, dynamic>);
             serverDataLoaded = true;
           }
         } catch (_) {}
       }
 
-      // Оффлайн-фолбэк
+
       if (!serverDataLoaded) {
         totalKm = await AchievementService.getTotalDistanceKm();
         totalDefects = await getDefectsCount();
@@ -379,14 +392,14 @@ class ApiService {
         unlockedAchievements: unlockedAchievements,
         streakDays: streakDays,
         communityPercentile: communityPercentile,
+        potholes: potholes,
+        roughRoads: roughRoads,
       );
     } catch (e) {
       debugPrint("Ошибка расчёта статистики: $e");
       return UserStats.empty();
     }
   }
-
-  // --- МЕТОДЫ ПОЕЗДОК ---
 
   static Future<int?> startTrip() async {
     try {
@@ -465,8 +478,6 @@ class ApiService {
     return null;
   }
 
-  // --- КОММЕНТАРИИ К ДЕФЕКТАМ ---
-
   static Future<List<DefectComment>> getComments(int clusterId) async {
     try {
       final res = await _client.get(Uri.parse('$baseUrl/telemetry/comments?cluster_id=$clusterId')).timeout(_httpTimeout);
@@ -506,8 +517,6 @@ class ApiService {
     return false;
   }
 
-  // --- МЕТОДЫ АКТИВНОСТИ ПОЛЬЗОВАТЕЛЯ ---
-
   static String _formatDateKey(DateTime dt) {
     final y = dt.year.toString().padLeft(4, '0');
     final m = dt.month.toString().padLeft(2, '0');
@@ -515,127 +524,99 @@ class ApiService {
     return '$y-$m-$d';
   }
 
-  static Future<void> recordAppOpen() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_keyActivityVisits);
-      Map<String, int> visits = {};
 
-      if (raw != null && raw.isNotEmpty) {
-        try {
-          final decoded = jsonDecode(raw) as Map<String, dynamic>;
-          visits = decoded.map((k, v) => MapEntry(k, (v as num).toInt()));
-        } catch (_) {}
-      }
-
-      final todayKey = _formatDateKey(DateTime.now());
-      visits[todayKey] = (visits[todayKey] ?? 0) + 1;
-
-      final cutoff = DateTime.now().subtract(const Duration(days: 90));
-      visits.removeWhere((key, _) {
-        try {
-          return DateTime.parse(key).isBefore(cutoff);
-        } catch (_) {
-          return true;
-        }
-      });
-
-      await prefs.setString(_keyActivityVisits, jsonEncode(visits));
-    } catch (e) {
-      debugPrint("Ошибка сохранения активности: $e");
-    }
-  }
 
   static Future<UserActivityData> getActivityData() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_keyActivityVisits);
-      Map<String, int> visits = {};
-
-      if (raw != null && raw.isNotEmpty) {
-        try {
-          final decoded = jsonDecode(raw) as Map<String, dynamic>;
-          visits = decoded.map((k, v) => MapEntry(k, (v as num).toInt()));
-        } catch (_) {}
-      }
-
-      final now = DateTime.now();
-      final today = DateTime(now.year, now.month, now.day);
-      final todayKey = _formatDateKey(today);
-
-      if (!visits.containsKey(todayKey)) {
-        visits[todayKey] = 1;
-        await prefs.setString(_keyActivityVisits, jsonEncode(visits));
-      }
-
-      final currentWeekMonday = today.subtract(
-        Duration(days: today.weekday - 1),
-      );
-      final gridStartDate = currentWeekMonday.subtract(
-        const Duration(days: 21),
-      );
-
-      final List<DayActivity> days = [];
-      int totalVisits = 0;
-      int activeDays = 0;
-
-      for (int i = 0; i < 28; i++) {
-        final cellDate = gridStartDate.add(Duration(days: i));
-        final key = _formatDateKey(cellDate);
-        final isFuture = cellDate.isAfter(today);
-        final count = isFuture ? 0 : (visits[key] ?? 0);
-
-        int level = 0;
-        if (count >= 6) {
-          level = 3;
-        } else if (count >= 3) {
-          level = 2;
-        } else if (count >= 1) {
-          level = 1;
+    final prefs = await freshPrefs();
+    final token = await getAccessToken();
+    if (token != null && token.isNotEmpty) {
+      try {
+        final res = await _client.get(
+          Uri.parse('$baseUrl/auth/me'),
+          headers: {'Authorization': 'Bearer $token'},
+        ).timeout(_httpTimeout);
+        if (res.statusCode == 200) {
+          await _cacheActivity(prefs, jsonDecode(res.body) as Map<String, dynamic>);
         }
-
-        if (count > 0) {
-          totalVisits += count;
-          activeDays++;
-        }
-
-        days.add(
-          DayActivity(
-            date: cellDate,
-            count: count,
-            level: level,
-            isToday: key == todayKey,
-            isFuture: isFuture,
-          ),
-        );
+      } catch (e) {
+        debugPrint("Ошибка получения активности: $e");
       }
-
-      int streak = 0;
-      DateTime checkDate = today;
-      while (true) {
-        final key = _formatDateKey(checkDate);
-        final count = visits[key] ?? 0;
-        if (count > 0) {
-          streak++;
-          checkDate = checkDate.subtract(const Duration(days: 1));
-        } else {
-          break;
-        }
-      }
-
-      return UserActivityData(
-        days: days,
-        streakDays: streak,
-        totalVisits: totalVisits,
-        activeDays: activeDays,
-      );
-    } catch (e) {
-      debugPrint("Ошибка получения активности: $e");
-      return UserActivityData.empty();
     }
+    return _activityFromCache(prefs);
   }
 
-  // --- МЕТОДЫ АВТОРИЗАЦИИ И ПРОФИЛЯ ---
+
+  static Future<UserActivityData> getCachedActivityData() async {
+    return _activityFromCache(await freshPrefs());
+  }
+
+  static Future<void> _cacheActivity(
+    SharedPreferences prefs,
+    Map<String, dynamic> profile,
+  ) {
+    return prefs.setString(
+      kKeyActivityCache,
+      jsonEncode({
+        'streak_days': profile['streak_days'] ?? 0,
+        'activity_days': profile['activity_days'] ?? const [],
+      }),
+    );
+  }
+
+  static UserActivityData _activityFromCache(SharedPreferences prefs) {
+    Map<String, dynamic> cache = const {};
+    try {
+      final raw = prefs.getString(kKeyActivityCache);
+      if (raw != null) cache = jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {}
+
+    final byDate = <String, ({double meters, int defects})>{};
+    for (final d in (cache['activity_days'] as List?) ?? const []) {
+      if (d is! Map) continue;
+      byDate[d['date'].toString()] = (
+        meters: (d['distance_meters'] as num?)?.toDouble() ?? 0.0,
+        defects: (d['defects'] as num?)?.toInt() ?? 0,
+      );
+    }
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final todayKey = _formatDateKey(today);
+    final gridStartDay = today.day - (today.weekday - 1) - 21;
+
+    final days = <DayActivity>[];
+    var activeDays = 0;
+    var totalMeters = 0.0;
+    for (var i = 0; i < 28; i++) {
+      final date = DateTime(today.year, today.month, gridStartDay + i);
+      final key = _formatDateKey(date);
+      final isFuture = date.isAfter(today);
+      final day = isFuture ? null : byDate[key];
+      final meters = day?.meters ?? 0.0;
+      final defects = day?.defects ?? 0;
+      final level = activityLevel(meters, defects);
+      if (level > 0) activeDays++;
+      totalMeters += meters;
+      days.add(
+        DayActivity(
+          date: date,
+          count: defects,
+          meters: meters,
+          level: level,
+          isToday: key == todayKey,
+          isFuture: isFuture,
+        ),
+      );
+    }
+
+    return UserActivityData(
+      days: days,
+      streakDays: (cache['streak_days'] as num?)?.toInt() ?? 0,
+      totalMeters: totalMeters,
+      activeDays: activeDays,
+    );
+  }
+
 
   static Future<String?> requestCode(String phone) async {
     try {
@@ -789,7 +770,7 @@ class ApiService {
     }
   }
 
-  /// Серверное удаление аккаунта с анонимизацией телеметрии
+
   static Future<bool> deleteAccount() async {
     try {
       final token = await getAccessToken();
@@ -812,9 +793,7 @@ class ApiService {
     return false;
   }
 
-  // --- ТЕЛЕМЕТРИЯ ДЕФЕКТОВ И ДИСТАНЦИИ ---
-
-  static Future<bool> sendDistance(double meters) async {
+  static Future<bool> sendDistance(double meters, {String? batchId}) async {
     if (meters <= 0) return true;
     try {
       final token = await getAccessToken();
@@ -830,10 +809,11 @@ class ApiService {
         },
         body: jsonEncode({
           'distance_meters': meters,
+          'batch_id': ?batchId,
         }),
       ).timeout(_httpTimeout);
       if (response.statusCode != 200) return false;
-      // Для гостя/невалидного токена сервер отвечает 200, но ничего не пишет (total = 0).
+
       final data = jsonDecode(response.body);
       final total = (data['total_distance_meters'] as num?)?.toDouble() ?? 0.0;
       return total > 0;
@@ -843,32 +823,54 @@ class ApiService {
     }
   }
 
+
+
+
+  static Future<double> sendPendingDistance(
+    SharedPreferences prefs,
+    double pending,
+  ) async {
+    var batchId = prefs.getString(kKeyDistanceBatchId);
+    var meters = prefs.getDouble(kKeyDistanceBatchMeters) ?? 0.0;
+    if (batchId == null || meters <= 0) {
+      meters = min(pending, kMaxDistanceBatchM);
+      if (meters <= 0) return 0.0;
+      batchId =
+          '${DateTime.now().microsecondsSinceEpoch}-${Random().nextInt(1 << 31)}';
+      await prefs.setString(kKeyDistanceBatchId, batchId);
+      await prefs.setDouble(kKeyDistanceBatchMeters, meters);
+    }
+
+    if (!await sendDistance(meters, batchId: batchId)) return 0.0;
+    await prefs.remove(kKeyDistanceBatchId);
+    await prefs.remove(kKeyDistanceBatchMeters);
+    return meters;
+  }
+
+
+
   static Future<void> flushPendingDistance() async {
     try {
+      if (await FlutterForegroundTask.isRunningService) return;
       final token = await getAccessToken();
       if (token == null || token.isEmpty) return;
 
       final prefs = await freshPrefs();
-      final pending = prefs.getDouble(kKeyPendingDistanceMeters) ?? 0.0;
-      if (pending <= 0) return;
-
-      final success = await sendDistance(pending);
-      if (success) {
-        final current = prefs.getDouble(kKeyPendingDistanceMeters) ?? 0.0;
-        final remainder = current - pending;
-        await prefs.setDouble(
-          kKeyPendingDistanceMeters,
-          remainder > 0 ? remainder : 0.0,
-        );
-        addLog("✅ Буфер пробега синхронизирован: +${pending.toStringAsFixed(0)} м");
+      var pending = prefs.getDouble(kKeyPendingDistanceMeters) ?? 0.0;
+      while (pending > 0) {
+        final sent = await sendPendingDistance(prefs, pending);
+        if (sent <= 0) break;
+        pending = max(pending - sent, 0.0);
+        await prefs.setDouble(kKeyPendingDistanceMeters, pending);
+        addLog("✅ Буфер пробега синхронизирован: +${sent.toStringAsFixed(0)} м");
       }
     } catch (e) {
       debugPrint("Ошибка сброса буфера пробега: $e");
     }
   }
 
-  /// Без токена не отправляем: событие осталось бы «гостевым» и не попало бы в профиль.
-  /// Статус 401 оставляет его в очереди до входа в аккаунт.
+
+
   static Future<DefectSendResult> sendDefectStatus({
     required double lat,
     required double lon,

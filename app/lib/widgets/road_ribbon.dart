@@ -8,11 +8,10 @@ class RibbonSegment {
   const RibbonSegment({required this.flex, required this.color});
 }
 
-/// Виджет «Полоса» — непрерывная дорожная лента качества покрытия
 class RoadRibbon extends StatelessWidget {
   final List<RibbonSegment> segments;
   final double height;
-  /// Положение маркера «вы здесь» от 0.0 до 1.0 (если null — маркер не рисуется)
+
   final double? currentPosition;
 
   const RoadRibbon({
@@ -31,7 +30,7 @@ class RoadRibbon extends StatelessWidget {
         return Stack(
           clipBehavior: Clip.none,
           children: [
-            // Сама лента сегментов
+
             ClipRRect(
               borderRadius: BorderRadius.circular(height / 2),
               child: SizedBox(
@@ -48,7 +47,7 @@ class RoadRibbon extends StatelessWidget {
               ),
             ),
 
-            // Маркер текущего положения («вы здесь»)
+
             if (currentPosition != null)
               Positioned(
                 left: (constraints.maxWidth * currentPosition!.clamp(0.0, 1.0)) - 1.5,

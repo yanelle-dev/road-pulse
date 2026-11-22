@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Необходимо задать POSTGRES_PASSWORD в файле .env}
       POSTGRES_DB: ${POSTGRES_DB:-road_pulse_db}
     ports:
-      # Только для локальной разработки (go run на хосте); наружу порт не открываем.
+
       - '127.0.0.1:5432:5432'
     volumes:
       - road_pulse_data:/var/lib/postgresql/data
@@ -29,6 +29,7 @@ services:
       - SMS_GATE_USER=${SMS_GATE_USER:-}
       - SMS_GATE_PASSWORD=${SMS_GATE_PASSWORD:-}
       - TRUST_PROXY=${TRUST_PROXY:-false}
+      - EXPOSE_OTP=${EXPOSE_OTP:-false}
     ports:
       - '8001:8000'
     depends_on:

@@ -29,8 +29,8 @@ func (h *TelemetryHandler) PostTelemetry(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Токен прислан, но не принят (истёк/подделан): запись «как гость» засчитала бы яму
-	// не тому пользователю и дала бы ложное подтверждение. Клиент на 401 обновляет токен и повторяет.
+
+
 	uid := userIDFrom(r)
 	if uid == "" && strings.TrimSpace(r.Header.Get("Authorization")) != "" {
 		respondDetail(w, http.StatusUnauthorized, "Недействительный токен")
@@ -71,8 +71,8 @@ func (h *TelemetryHandler) PostDistance(w http.ResponseWriter, r *http.Request) 
 	}
 
 	userID := userIDFrom(r)
-	// Токен прислан, но не принят (истёк/подделан): раньше это молча превращалось в гостя
-	// с ответом 200, и клиент стирал накопленный пробег. Теперь — явный 401.
+
+
 	if userID == "" && strings.TrimSpace(r.Header.Get("Authorization")) != "" {
 		respondDetail(w, http.StatusUnauthorized, "Недействительный токен")
 		return
@@ -81,7 +81,7 @@ func (h *TelemetryHandler) PostDistance(w http.ResponseWriter, r *http.Request) 
 		userID = "anonymous"
 	}
 
-	resp, err := h.service.RecordDistance(r.Context(), userID, payload.DistanceMeters)
+	resp, err := h.service.RecordDistance(r.Context(), userID, payload.DistanceMeters, payload.BatchID)
 	if err != nil {
 		respondError(w, err)
 		return
@@ -123,7 +123,7 @@ func (h *TelemetryHandler) PostComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Имя автора берётся из профиля в БД, поле author_name из тела игнорируется.
+
 	comment, err := h.service.AddComment(r.Context(), payload.ClusterID, userID, "", payload.Text)
 	if err != nil {
 		respondError(w, err)

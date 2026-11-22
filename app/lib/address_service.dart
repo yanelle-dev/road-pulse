@@ -1,12 +1,10 @@
 import 'package:geocoding/geocoding.dart';
 import 'dart:ui' show Locale;
-/// Подпись места дефекта. Название дороги приходит с сервера (OSRM знает дорогу, на которую
-/// привязана яма); геокодер устройства возвращает ближайший дом и ограничивает частоту запросов,
-/// поэтому он только запасной вариант, а ответ кэшируется.
+
 class AddressService {
   static final Map<String, Future<String?>> _cache = {};
 
-  /// Мгновенная подпись, если она есть в данных кластера.
+
   static String? fromDefect(Map<String, dynamic> defect) {
     final name = (defect['road_name'] as String?)?.trim();
     return (name == null || name.isEmpty) ? null : name;

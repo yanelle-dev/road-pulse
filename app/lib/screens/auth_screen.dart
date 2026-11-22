@@ -230,7 +230,7 @@ class _AuthScreenState extends State<AuthScreen> {
           ),
           const SizedBox(height: 18),
           Text(
-            "Общая карта ям, которую строят водители. Чтобы ваш вклад засчитывался, нужен номер телефона — больше ничего.",
+            "Общая карта ям, которую строят водители. Чтобы ваш вклад засчитывался, нужен номер телефона — бол��ше ничего.",
             style: TextStyle(
               fontFamily: AppTheme.fontUi,
               fontSize: 15.5,
@@ -462,7 +462,7 @@ class _AuthScreenState extends State<AuthScreen> {
                         ),
                         const SizedBox(width: 8),
                         Text(
-                          "Тестовый код: $_devCode (нажмите)",
+                          "Код из лога сервера: $_devCode · нажмите",
                           style: TextStyle(
                             fontFamily: AppTheme.fontMono,
                             fontSize: 13,

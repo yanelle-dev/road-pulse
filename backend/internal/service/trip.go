@@ -29,8 +29,8 @@ func NewTripService(pool *pgxpool.Pool) *TripService {
 	return &TripService{pool: pool}
 }
 
-// normalizeTrip проверяет границы и приводит доли качества к сумме 1: старые версии клиента
-// присылали зажатые значения, дававшие сумму больше единицы.
+
+
 func normalizeTrip(p *models.FinishTripPayload) error {
 	ratios := []*float64{&p.SmoothRatio, &p.MediumRatio, &p.HardRatio}
 	sum := 0.0
@@ -65,7 +65,7 @@ func (s *TripService) StartTrip(ctx context.Context, userID string) (int64, erro
 	return tripID, nil
 }
 
-// FinishTrip завершает только собственную незавершённую поездку: повторный вызов не перезаписывает итоги.
+
 func (s *TripService) FinishTrip(ctx context.Context, userID string, p *models.FinishTripPayload) (*models.Trip, error) {
 	if err := normalizeTrip(p); err != nil {
 		return nil, err

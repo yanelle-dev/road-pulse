@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 
 import '../app_theme.dart';
 
-/// Маркер «вы здесь» как в навигаторах: стрелка по курсу движения, пока курс неизвестен — точка.
+
 class NavArrow extends StatelessWidget {
-  /// Курс в градусах без обнуления на 360°: так анимация поворота идёт кратчайшим путём.
+
   final double? headingDeg;
 
   const NavArrow({super.key, required this.headingDeg});
@@ -76,7 +76,7 @@ class _ArrowPainter extends CustomPainter {
       ..lineTo(notch.dx, notch.dy)
       ..lineTo(left.dx, left.dy)
       ..close();
-    // Правая половина темнее — стрелка выглядит объёмной.
+
     final shade = Path()
       ..moveTo(tip.dx, tip.dy)
       ..lineTo(right.dx, right.dy)

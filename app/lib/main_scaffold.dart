@@ -1,4 +1,3 @@
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'app_theme.dart';
 import 'map_screen.dart';
@@ -38,7 +37,11 @@ class MainScaffoldState extends State<MainScaffold> {
       extendBody: true,
       body: IndexedStack(
         index: _currentIndex,
-        children: screens,
+        children: [
+
+          for (var i = 0; i < screens.length; i++)
+            TickerMode(enabled: i == _currentIndex, child: screens[i]),
+        ],
       ),
       bottomNavigationBar: _buildBottomNav(context),
     );
@@ -48,8 +51,9 @@ class MainScaffoldState extends State<MainScaffold> {
     final colors = context.colors;
 
     return ClipRRect(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+
+      child: ColoredBox(
+        color: colors.voidBg,
         child: Container(
           height: 86,
           decoration: BoxDecoration(

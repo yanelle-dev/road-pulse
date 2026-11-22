@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../app_theme.dart';
 import '../main.dart' show themeModeNotifier;
 
-/// Сегментированный переключатель темы: «Система / Светлая / Тёмная».
+
 class ThemeModeSelector extends StatelessWidget {
   const ThemeModeSelector({super.key});
 

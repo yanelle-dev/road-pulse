@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
@@ -25,22 +27,15 @@ class _DetectScreenState extends State<DetectScreen> {
   bool _isActive = false;
 
   StreamSubscription<Position>? _positionStream;
-  StreamSubscription<AccelerometerEvent>? _accelStream;
 
-  double _currentSpeed = 0.0;
-  double _tripDistanceMeters = 0.0;
 
-  final int _maxDataPoints = 60;
-  List<double> _accelData = [];
 
-  final GravityFilter _gravity = GravityFilter();
-  double _latestVertical = 0.0;
-  Timer? _scopeTimer;
+  final ValueNotifier<double> _speedKmh = ValueNotifier(0.0);
+  final ValueNotifier<double> _tripMeters = ValueNotifier(0.0);
 
   @override
   void initState() {
     super.initState();
-    _accelData = List.generate(_maxDataPoints, (_) => 0.0);
 
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
 
@@ -48,16 +43,21 @@ class _DetectScreenState extends State<DetectScreen> {
       await freshPrefs();
       _checkPermissionsAndStart();
     });
+  }
 
-    _initSensors();
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+
+    _setGpsListening(TickerMode.valuesOf(context).enabled);
   }
 
   @override
   void dispose() {
     FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
     _positionStream?.cancel();
-    _accelStream?.cancel();
-    _scopeTimer?.cancel();
+    _speedKmh.dispose();
+    _tripMeters.dispose();
     super.dispose();
   }
 
@@ -65,53 +65,37 @@ class _DetectScreenState extends State<DetectScreen> {
     if (data is String) {
       if (data.startsWith("TRIP:")) {
         final meters = double.tryParse(data.substring(5));
-        if (meters != null && mounted) {
-          setState(() {
-            _tripDistanceMeters = meters;
-          });
-        }
+        if (meters != null && mounted) _tripMeters.value = meters;
       } else {
         ApiService.addLog(data);
       }
     }
   }
 
-  void _initSensors() {
+  void _setGpsListening(bool enabled) {
+    if (enabled == (_positionStream != null)) return;
+    if (!enabled) {
+      _positionStream?.cancel();
+      _positionStream = null;
+      return;
+    }
     _positionStream = Geolocator.getPositionStream(
       locationSettings: gpsStreamSettings(distanceFilter: 1),
     ).listen((Position position) {
-      if (!mounted) return;
-
-      final gpsSpeedKmh = (position.speed * 3.6).clamp(0.0, 999.0);
-
-      setState(() {
-        _currentSpeed = gpsSpeedKmh;
-      });
-    });
-
-    // Тот же период, что и у фонового изолята: sensors_plus применяет
-    // последний заданный период ко всем слушателям потока.
-    _accelStream = accelerometerEventStream(
-      samplingPeriod: const Duration(milliseconds: 10),
-    ).listen((AccelerometerEvent e) {
-      final s = _gravity.update(e.x, e.y, e.z, DateTime.now().microsecondsSinceEpoch);
-      if (s == null) return;
-      // Пик за интервал отрисовки, чтобы короткий удар не терялся.
-      if (s.vertical.abs() > _latestVertical.abs()) _latestVertical = s.vertical;
+      _speedKmh.value = (position.speed * 3.6).clamp(0.0, 999.0);
     }, onError: (_) {});
-
-    // Перерисовка осциллографа ~15 кадров/с вместо 100 setState в секунду.
-    _scopeTimer = Timer.periodic(const Duration(milliseconds: 66), (_) {
-      if (!mounted) return;
-      setState(() {
-        _accelData.removeAt(0);
-        _accelData.add(_latestVertical);
-        _latestVertical = 0.0;
-      });
-    });
   }
 
   Future<void> _checkPermissionsAndStart() async {
+
+
+    if (await FlutterForegroundTask.isRunningService) {
+      await _initForegroundTask();
+      _tripMeters.value = (await freshPrefs()).getDouble(kKeyTripMeters) ?? 0.0;
+      if (mounted) setState(() => _isActive = true);
+      return;
+    }
+
     LocationPermission permission = await Geolocator.checkPermission();
 
     if (permission == LocationPermission.always ||
@@ -182,10 +166,8 @@ class _DetectScreenState extends State<DetectScreen> {
           notificationText: 'Служба записи дорожного покрытия активна',
           callback: startCallback,
         );
-        setState(() {
-          _isActive = true;
-          _tripDistanceMeters = 0.0;
-        });
+        _tripMeters.value = 0.0;
+        setState(() => _isActive = true);
       }
     } catch (e) {
       ApiService.addLog("Ошибка службы: $e");
@@ -202,16 +184,25 @@ class _DetectScreenState extends State<DetectScreen> {
         body: SafeArea(
           bottom: false,
           child: SingleChildScrollView(
-            physics: const BouncingScrollPhysics(),
+            physics: const ClampingScrollPhysics(),
             padding: const EdgeInsets.only(bottom: 120),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 _buildHeader(colors),
-                _buildSpeedometer(colors),
-                _buildOdometerCard(colors),
-                _buildGateBanner(colors),
-                _buildScope(colors),
+                ValueListenableBuilder<double>(
+                  valueListenable: _speedKmh,
+                  builder: (context, speed, child) => _buildSpeedometer(colors, speed),
+                ),
+                ValueListenableBuilder<double>(
+                  valueListenable: _tripMeters,
+                  builder: (context, meters, child) => _buildOdometerCard(colors, meters),
+                ),
+                ValueListenableBuilder<double>(
+                  valueListenable: _speedKmh,
+                  builder: (context, speed, child) => _buildGateBanner(colors, speed),
+                ),
+                _VibrationScope(speedKmh: _speedKmh),
                 _buildTerminal(colors),
                 _buildActionButton(colors),
               ],
@@ -273,8 +264,8 @@ class _DetectScreenState extends State<DetectScreen> {
     );
   }
 
-  Widget _buildSpeedometer(PolotnoColors colors) {
-    final int speedInt = _currentSpeed.round();
+  Widget _buildSpeedometer(PolotnoColors colors, double speedKmh) {
+    final int speedInt = speedKmh.round();
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
@@ -312,9 +303,9 @@ class _DetectScreenState extends State<DetectScreen> {
     );
   }
 
-  Widget _buildOdometerCard(PolotnoColors colors) {
-    final kmStr = (_tripDistanceMeters / 1000.0).toStringAsFixed(2);
-    final mStr = _tripDistanceMeters.toStringAsFixed(0);
+  Widget _buildOdometerCard(PolotnoColors colors, double tripMeters) {
+    final kmStr = (tripMeters / 1000.0).toStringAsFixed(2);
+    final mStr = tripMeters.toStringAsFixed(0);
 
     return Container(
       margin: const EdgeInsets.fromLTRB(20, 8, 20, 0),
@@ -357,8 +348,8 @@ class _DetectScreenState extends State<DetectScreen> {
     );
   }
 
-  Widget _buildGateBanner(PolotnoColors colors) {
-    final bool isAboveThreshold = _currentSpeed >= kMinDefectSpeedKmh;
+  Widget _buildGateBanner(PolotnoColors colors, double speedKmh) {
+    final bool isAboveThreshold = speedKmh >= kMinDefectSpeedKmh;
 
     return Container(
       margin: const EdgeInsets.fromLTRB(20, 10, 20, 0),
@@ -408,63 +399,6 @@ class _DetectScreenState extends State<DetectScreen> {
                               "Пробег пишется на любой скорости (пешком и авто). Запись ударов полотна включится от 20 км/ч.",
                         ),
                       ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildScope(PolotnoColors colors) {
-    final double currentZ = _accelData.isNotEmpty ? _accelData.last : 0.0;
-    final double threshold = bumpThresholdFor(_currentSpeed);
-
-    return Container(
-      height: 140,
-      margin: const EdgeInsets.fromLTRB(20, 10, 20, 0),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: colors.surf,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: colors.edge2),
-      ),
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                "ВИБРАЦИЯ · ВЕРТИКАЛЬ",
-                style: TextStyle(
-                  fontFamily: AppTheme.fontMono,
-                  fontSize: 9.5,
-                  fontWeight: FontWeight.w500,
-                  letterSpacing: 1.4,
-                  color: colors.ink3,
-                ),
-              ),
-              Text(
-                "${currentZ.abs().toStringAsFixed(1)} м/с²",
-                style: TextStyle(
-                  fontFamily: AppTheme.fontMono,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: currentZ.abs() >= threshold ? colors.s3 : colors.ink,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Expanded(
-            child: CustomPaint(
-              size: Size.infinite,
-              painter: PolotnoScopePainter(
-                data: _accelData,
-                threshold: threshold,
-                lineColor: colors.s1,
-                gridColor: colors.edge,
-                alertColor: colors.s3,
               ),
             ),
           ),
@@ -567,9 +501,12 @@ class _DetectScreenState extends State<DetectScreen> {
                         children: [
                           if (time.isNotEmpty) ...[
                             SizedBox(
-                              width: 42,
+                              width: 58,
                               child: Text(
                                 time,
+                                maxLines: 1,
+                                softWrap: false,
+                                overflow: TextOverflow.clip,
                                 style: TextStyle(
                                   fontFamily: AppTheme.fontMono,
                                   fontSize: 10.5,
@@ -633,8 +570,131 @@ class _DetectScreenState extends State<DetectScreen> {
   }
 }
 
+class _VibrationScope extends StatefulWidget {
+  const _VibrationScope({required this.speedKmh});
+
+  final ValueListenable<double> speedKmh;
+
+  @override
+  State<_VibrationScope> createState() => _VibrationScopeState();
+}
+
+
+
+class _VibrationScopeState extends State<_VibrationScope>
+    with SingleTickerProviderStateMixin {
+  static const int _maxDataPoints = 60;
+  static const Duration _frameInterval = Duration(milliseconds: 66);
+
+  final List<double> _data = List<double>.filled(_maxDataPoints, 0.0, growable: true);
+  final GravityFilter _gravity = GravityFilter();
+  StreamSubscription<AccelerometerEvent>? _accelStream;
+  late final Ticker _ticker;
+  Duration _lastFrame = Duration.zero;
+  double _latestVertical = 0.0;
+  int _revision = 0;
+
+  @override
+  void initState() {
+    super.initState();
+
+
+    _accelStream = accelerometerEventStream(
+      samplingPeriod: const Duration(milliseconds: 10),
+    ).listen((AccelerometerEvent e) {
+      final s = _gravity.update(e.x, e.y, e.z, DateTime.now().microsecondsSinceEpoch);
+      if (s == null) return;
+
+      if (s.vertical.abs() > _latestVertical.abs()) _latestVertical = s.vertical;
+    }, onError: (_) {});
+    _ticker = createTicker(_onTick)..start();
+  }
+
+  void _onTick(Duration elapsed) {
+    if (elapsed - _lastFrame < _frameInterval) return;
+    _lastFrame = elapsed;
+    setState(() {
+      _data.removeAt(0);
+      _data.add(_latestVertical);
+      _latestVertical = 0.0;
+      _revision++;
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    _accelStream?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final double currentZ = _data.last;
+    final double threshold = bumpThresholdFor(widget.speedKmh.value);
+
+    return Container(
+      height: 140,
+      margin: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: colors.surf,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: colors.edge2),
+      ),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                "ВИБРАЦИЯ · ВЕРТИКАЛЬ",
+                style: TextStyle(
+                  fontFamily: AppTheme.fontMono,
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 1.4,
+                  color: colors.ink3,
+                ),
+              ),
+              Text(
+                "${currentZ.abs().toStringAsFixed(1)} м/с²",
+                style: TextStyle(
+                  fontFamily: AppTheme.fontMono,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: currentZ.abs() >= threshold ? colors.s3 : colors.ink,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: RepaintBoundary(
+              child: CustomPaint(
+                size: Size.infinite,
+                painter: PolotnoScopePainter(
+                  data: _data,
+                  revision: _revision,
+                  threshold: threshold,
+                  lineColor: colors.s1,
+                  gridColor: colors.edge,
+                  alertColor: colors.s3,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+}
+
 class PolotnoScopePainter extends CustomPainter {
   final List<double> data;
+  final int revision;
   final double threshold;
   final Color lineColor;
   final Color gridColor;
@@ -642,6 +702,7 @@ class PolotnoScopePainter extends CustomPainter {
 
   PolotnoScopePainter({
     required this.data,
+    required this.revision,
     required this.threshold,
     required this.lineColor,
     required this.gridColor,
@@ -713,5 +774,10 @@ class PolotnoScopePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant PolotnoScopePainter oldDelegate) => true;
+  bool shouldRepaint(covariant PolotnoScopePainter oldDelegate) =>
+      revision != oldDelegate.revision ||
+      threshold != oldDelegate.threshold ||
+      lineColor != oldDelegate.lineColor ||
+      gridColor != oldDelegate.gridColor ||
+      alertColor != oldDelegate.alertColor;
 }

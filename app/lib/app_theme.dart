@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// Дизайн-токены системы «Полотно»
+
 class PolotnoColors extends ThemeExtension<PolotnoColors> {
   final Color voidBg;
   final Color asphalt;
@@ -56,7 +56,7 @@ class PolotnoColors extends ThemeExtension<PolotnoColors> {
     required this.term,
   });
 
-  /// Светлая тема (основа — бетон #EDEDEA, не белый)
+
   static const light = PolotnoColors(
     voidBg: Color(0xFFEDEDEA),
     asphalt: Color(0xFFF5F5F3),
@@ -83,7 +83,7 @@ class PolotnoColors extends ThemeExtension<PolotnoColors> {
     term: Color(0xFF101113),
   );
 
-  /// Тёмная тема (асфальт и фары #08090A)
+
   static const dark = PolotnoColors(
     voidBg: Color(0xFF08090A),
     asphalt: Color(0xFF0E1012),
@@ -194,7 +194,7 @@ class PolotnoColors extends ThemeExtension<PolotnoColors> {
   }
 }
 
-/// Удобный доступ к токенам через context.colors
+
 extension PolotnoThemeContext on BuildContext {
   PolotnoColors get colors =>
       Theme.of(this).extension<PolotnoColors>() ?? PolotnoColors.light;

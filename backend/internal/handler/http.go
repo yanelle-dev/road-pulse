@@ -9,7 +9,7 @@ import (
 	"road_pulse/backend/internal/service"
 )
 
-const maxBodyBytes = 256 << 10 // трек из 50 точек укладывается с запасом
+const maxBodyBytes = 256 << 10
 
 func respondJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -21,7 +21,7 @@ func respondDetail(w http.ResponseWriter, status int, detail string) {
 	respondJSON(w, status, map[string]string{"detail": detail})
 }
 
-// respondError маппит ошибки сервисов в HTTP-коды; внутренние детали наружу не отдаём.
+
 func respondError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, service.ErrInvalidTelemetry),

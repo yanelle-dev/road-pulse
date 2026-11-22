@@ -37,7 +37,7 @@ class TrajectoryPoint {
   };
 }
 
-/// GPS-фикс: recvMs — момент получения по внутренним часам, wallMs — время самого фикса (эпоха, мс).
+
 class _Fix {
   final Position pos;
   final int recvMs;
@@ -52,7 +52,7 @@ class _SpeedPt {
   _SpeedPt(this.t, this.kmh);
 }
 
-/// Сэмпл ускорения: v — вертикаль (вдоль гравитации), h — горизонталь.
+
 class _Sample {
   final int t;
   final double v;
@@ -61,18 +61,18 @@ class _Sample {
 }
 
 class SensorTaskHandler extends TaskHandler {
-  // ---- Параметры алгоритма (подбирать по полевым данным) ----
-  static const int _windowMs = 600; // окно захвата удара (оба моста)
-  static const int _warmupMs = 2000; // прогрев оценки гравитации
-  static const double _gyroRejectRadS = 5.0; // телефон взяли в руки / уронили
+
+  static const int _windowMs = 600;
+  static const int _warmupMs = 2000;
+  static const double _gyroRejectRadS = 5.0;
   static const int _postEventBlockMs = 1000;
-  static const int _pulseGapMs = 40; // разрыв внутри одного импульса (смена знака отклика)
-  static const double _roughForceScale = 5.0; // RMS -> «сила» для сервера
+  static const int _pulseGapMs = 40;
+  static const double _roughForceScale = 5.0;
   static const double _roughMaxSpeedKmh = 60.0;
   static const int _roughCooldownMs = 10000;
-  static const int _roughTrackSec = 5; // участок тряски — последние секунды, а не весь буфер
+  static const int _roughTrackSec = 5;
   static const int _fixHistory = 6;
-  static const double _headingMinStepM = 3.0; // короче шаг — курс по двум фиксам ненадёжен
+  static const double _headingMinStepM = 3.0;
   static const double _maxExtrapolateSec = 2.5;
   static const int _maxQueue = 100;
   static const String _kQueueKey = 'pending_defects_v1';
@@ -86,26 +86,26 @@ class SensorTaskHandler extends TaskHandler {
 
   final GravityFilter _gravity = GravityFilter();
 
-  // GPS
+
   final List<_Fix> _fixes = [];
   final List<_SpeedPt> _speedHist = [];
   final List<TrajectoryPoint> _trajectoryBuffer = [];
 
-  // Окно удара
+
   List<_Sample>? _win;
   int _winStartT = 0;
   _Fix? _winFix;
   double _winGyroPeak = 0;
   int _blockedUntil = 0;
 
-  // Плохая дорога: RMS по бинам 0.5 c
+
   final List<double> _bins = [];
   double _binSumSq = 0;
   int _binCount = 0;
   int _binStartT = 0;
   int _roughUntil = 0;
 
-  // Одометр
+
   Position? _lastDistancePosition;
   double _pendingDistanceMeters = 0.0;
   double _tripDistanceMeters = 0.0;
@@ -114,13 +114,13 @@ class SensorTaskHandler extends TaskHandler {
   Future<void>? _syncFuture;
   bool _pendingDirty = false;
 
-  // Поездка
+
   int? _currentTripId;
   Future<void>? _tripStart;
   int _tripDefectsCount = 0;
-  final Map<int, int> _segSeverity = {}; // сегмент 100 м -> 2 (medium) / 3 (hard)
+  final Map<int, int> _segSeverity = {};
 
-  // Очередь неотправленных дефектов
+
   List<Map<String, dynamic>> _queue = [];
   bool _flushing = false;
 
@@ -139,9 +139,10 @@ class SensorTaskHandler extends TaskHandler {
     _pendingDistanceMeters = prefs.getDouble(kKeyPendingDistanceMeters) ?? 0.0;
     _loadQueue(prefs);
     _tripDistanceMeters = 0.0;
+    await prefs.setDouble(kKeyTripMeters, 0.0);
     FlutterForegroundTask.sendDataToMain("TRIP:0.0");
 
-    // Датчики подписываем ДО сетевых вызовов.
+
     _positionSubscription = Geolocator.getPositionStream(
       locationSettings: gpsStreamSettings(),
     ).listen(_onPosition, onError: (_) {});
@@ -173,10 +174,10 @@ class SensorTaskHandler extends TaskHandler {
     } catch (_) {}
   }
 
-  // ======================= GPS =======================
 
-  /// Время фикса из самого GPS: оно точнее момента получения (доставка занимает до секунды).
-  /// Если часы GNSS и системные расходятся, берём момент получения.
+
+
+
   int _fixWallMs(Position p, int nowWall) {
     final wall = p.timestamp.millisecondsSinceEpoch;
     return (wall > nowWall + 200 || nowWall - wall > 3000) ? nowWall : wall;
@@ -207,7 +208,7 @@ class SensorTaskHandler extends TaskHandler {
     return f;
   }
 
-  /// Курс в точке _fixes[i]: по смещению от предыдущего фикса, а на малом шаге — по `heading` датчика.
+
   double? _courseAt(int i) {
     final cur = _fixes[i];
     if (i > 0) {
@@ -232,7 +233,7 @@ class SensorTaskHandler extends TaskHandler {
     return (cur.speedKmh > 10 && h >= 0 && h < 360) ? h : null;
   }
 
-  /// Позиция на момент пика: между двумя фиксами — интерполяция, после последнего — экстраполяция по курсу.
+
   ({double lat, double lon, double? course}) _positionAt(int peakWallMs) {
     final n = _fixes.length;
     final last = _fixes[n - 1];
@@ -280,10 +281,10 @@ class SensorTaskHandler extends TaskHandler {
       p.latitude,
       p.longitude,
     );
-    // Микрошаг: опорную точку НЕ сдвигаем, иначе медленное движение теряется.
+
     if (d < kOdometerMinStepM) return;
     _lastDistancePosition = p;
-    // Скачок GPS: сбрасываем опору, но не считаем.
+
     if (d >= kOdometerMaxStepM) return;
 
     _tripDistanceMeters += d;
@@ -300,12 +301,13 @@ class SensorTaskHandler extends TaskHandler {
     _pendingDirty = false;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble(kKeyPendingDistanceMeters, _pendingDistanceMeters);
+    await prefs.setDouble(kKeyTripMeters, _tripDistanceMeters);
   }
 
   Future<void> _checkAndSyncDistance({bool force = false}) async {
     if (_syncFuture != null) {
       if (!force) return;
-      await _syncFuture; // не отправляем те же метры дважды
+      await _syncFuture;
     }
     final now = DateTime.now();
     if (!force && now.isBefore(_syncBackoffUntil)) return;
@@ -328,18 +330,21 @@ class SensorTaskHandler extends TaskHandler {
 
   Future<void> _doSync(double meters, DateTime now) async {
     _lastDistanceSync = now;
-    bool ok = false;
+    double sent = 0.0;
     try {
-      ok = await ApiService.sendDistance(meters);
+      sent = await ApiService.sendPendingDistance(
+        await SharedPreferences.getInstance(),
+        meters,
+      );
     } catch (_) {}
 
-    if (ok) {
+    if (sent > 0) {
       _pendingDistanceMeters =
-          (_pendingDistanceMeters - meters).clamp(0.0, double.infinity);
+          (_pendingDistanceMeters - sent).clamp(0.0, double.infinity);
       _pendingDirty = true;
       await _persistPending();
       FlutterForegroundTask.sendDataToMain(
-        "✅ Пробег сохранён: +${meters.toStringAsFixed(0)} м",
+        "✅ Пробег сохранён: +${sent.toStringAsFixed(0)} м",
       );
     } else {
       _syncBackoffUntil = DateTime.now().add(const Duration(seconds: 15));
@@ -348,7 +353,7 @@ class SensorTaskHandler extends TaskHandler {
     }
   }
 
-  // ======================= Акселерометр =======================
+
 
   void _onAccel(AccelerometerEvent e) {
     final t = _clock.elapsedMilliseconds;
@@ -389,8 +394,8 @@ class SensorTaskHandler extends TaskHandler {
     }
   }
 
-  /// Ширина одного импульса вокруг пика (мс): до тех пор, пока |v| не упадёт ниже уровня дольше _pulseGapMs.
-  /// Удары передней и задней оси — разные импульсы, поэтому в ширину они не складываются.
+
+
   int _pulseWidthMs(List<_Sample> w, int peakIdx, double level) {
     int lo = peakIdx;
     int hi = peakIdx;
@@ -411,7 +416,7 @@ class SensorTaskHandler extends TaskHandler {
     return w[hi].t - w[lo].t;
   }
 
-  // ---- Классификация удара ----
+
   void _classifyWindow(List<_Sample> w, _Fix fix, double gyroPeak) {
     double peak = 0, hPeak = 0;
     int peakIdx = 0;
@@ -423,23 +428,23 @@ class SensorTaskHandler extends TaskHandler {
       if (w[i].h > hPeak) hPeak = w[i].h;
     }
 
-    // Горизонталь доминирует: торможение / манёвр.
+
     if (hPeak > peak) {
       _log("↩️ Манёвр/торможение (игнор)");
       return;
     }
-    // Телефон взяли в руки или уронили.
+
     if (gyroPeak > _gyroRejectRadS) {
       _log("↩️ Резкое вращение телефона (игнор)");
       return;
     }
 
-    // Лежачий полицейский — один широкий импульс. Ширина в метрах пути, а не в миллисекундах:
-    // на 25 км/ч оба удара оси ямы идут с задержкой около 0.4 с и по времени похожи на бугор.
+
+
     final pulseMs = _pulseWidthMs(w, peakIdx, peak * 0.5);
     final pulseM = pulseMs / 1000.0 * fix.speedKmh / 3.6;
 
-    // Торможение перед препятствием: скорость 3–6 с назад заметно выше.
+
     final tStart = w.first.t;
     double before = 0;
     for (final s in _speedHist) {
@@ -471,7 +476,7 @@ class SensorTaskHandler extends TaskHandler {
     );
   }
 
-  // ---- Плохая дорога по RMS ----
+
   void _feedRoughBins(int t, double v) {
     _binSumSq += v * v;
     _binCount++;
@@ -496,7 +501,7 @@ class SensorTaskHandler extends TaskHandler {
         fix.pos.accuracy > 40 ||
         fix.speedKmh < kMinDefectSpeedKmh ||
         fix.speedKmh > _roughMaxSpeedKmh) {
-      return; // блокировку не ставим: условия просто не выполнены
+      return;
     }
 
     final meanRms = high.reduce((a, b) => a + b) / high.length;
@@ -516,8 +521,8 @@ class SensorTaskHandler extends TaskHandler {
     );
   }
 
-  /// Точки трека за последние секунды: весь буфер (10 фиксов) уходил далеко за участок тряски,
-  /// и линия на карте рисовалась там, где тряски не было.
+
+
   List<Map<String, dynamic>> _roughTrack(int fixWallMs) {
     final cutoff = fixWallMs / 1000.0 - _roughTrackSec;
     return _trajectoryBuffer
@@ -538,7 +543,7 @@ class SensorTaskHandler extends TaskHandler {
     return (la2 * 180 / pi, lo2 * 180 / pi);
   }
 
-  // ======================= Отправка и очередь =======================
+
 
   void _emitDefect({
     required String type,
@@ -590,7 +595,7 @@ class SensorTaskHandler extends TaskHandler {
     );
   }
 
-  // 4xx (кроме 401/408/429) повторять бессмысленно: сервер отклонил данные.
+
   bool _isPermanent(int s) =>
       s >= 400 && s < 500 && s != 401 && s != 408 && s != 429;
 
@@ -650,14 +655,14 @@ class SensorTaskHandler extends TaskHandler {
           res = await _send(ev);
         } catch (_) {}
 
-        // remove(ev), а не removeAt(0): за время await _deliver мог вытеснить первый элемент.
+
         if (res.status == 200) {
           _queue.remove(ev);
           _onDelivered(res);
         } else if (_isPermanent(res.status)) {
           _queue.remove(ev);
         } else {
-          // Нет сети (статус 0) — не попытка: иначе тоннель в 30 с стирал бы очередь, рассчитанную на сутки.
+
           if (res.status != 0) ev['attempts'] = (ev['attempts'] as int) + 1;
           if ((ev['attempts'] as int) >= 5) _queue.remove(ev);
           break;
@@ -671,7 +676,7 @@ class SensorTaskHandler extends TaskHandler {
 
   void _log(String msg) => FlutterForegroundTask.sendDataToMain(msg);
 
-  // ======================= Жизненный цикл =======================
+
 
   @override
   void onRepeatEvent(DateTime timestamp) {
@@ -691,7 +696,7 @@ class SensorTaskHandler extends TaskHandler {
     } catch (_) {}
 
     if (_currentTripId != null && _currentTripId! > 0) {
-      // Доли — по длине дороги: сегменты по 100 м, а не по числу ударов.
+
       final segs = max(1, (_tripDistanceMeters / 100).ceil());
       final hard = _segSeverity.values.where((s) => s == 3).length;
       final med = _segSeverity.values.where((s) => s == 2).length;

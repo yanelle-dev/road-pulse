@@ -45,7 +45,7 @@ class AchievementService {
   ];
 
   static final List<Map<String, dynamic>> _catalog = [
-    // 1. Старт
+
     {
       "id": "first_km",
       "cat": "Старт",
@@ -71,7 +71,7 @@ class AchievementService {
       "target": 7,
     },
 
-    // 2. Водитель
+
     {
       "id": "first_find",
       "cat": "Водитель",
@@ -145,7 +145,7 @@ class AchievementService {
       "target": 5,
     },
 
-    // 3. Житель
+
     {
       "id": "neighbor",
       "cat": "Житель",
@@ -179,7 +179,7 @@ class AchievementService {
       "target": 5,
     },
 
-    // 4. Порядочный гражданин
+
     {
       "id": "first_shot",
       "cat": "Порядочный гражданин",
@@ -221,7 +221,7 @@ class AchievementService {
       "target": 1,
     },
 
-    // 5. Моя яма
+
     {
       "id": "applicant",
       "cat": "Моя яма",
@@ -263,7 +263,7 @@ class AchievementService {
       "target": 1,
     },
 
-    // 6. Доверие и сообщество
+
     {
       "id": "reliable_source",
       "cat": "Доверие и сообщество",
@@ -319,19 +319,19 @@ class AchievementService {
     await prefs.setString(_keyProgress, jsonEncode(progress));
   }
 
-  /// Получение всех 30 наград с актуализированным прогрессом
+
   static Future<List<Achievement>> getAchievements() async {
     final progress = await _loadRawProgress();
 
-    // Автоматическая сверка серии дней посещений
+
     try {
-      final act = await ApiService.getActivityData();
+      final act = await ApiService.getCachedActivityData();
       if (act.streakDays > 0) {
         progress['streak_7'] = act.streakDays;
       }
     } catch (_) {}
 
-    // Автоматическая сверка наград по дефектам
+
     try {
       final defCount = await ApiService.getDefectsCount();
       if (defCount > 0) {
@@ -359,19 +359,19 @@ class AchievementService {
     }).toList();
   }
 
-  /// Получение общего накопленного расстояния в метрах
+
   static Future<double> getTotalDistanceMeters() async {
     final prefs = await freshPrefs();
     return prefs.getDouble(_keyDistanceMeters) ?? 0.0;
   }
 
-  /// Получение общего накопленного расстояния в километрах
+
   static Future<double> getTotalDistanceKm() async {
     final meters = await getTotalDistanceMeters();
     return meters / 1000.0;
   }
 
-  /// Накопление пройденного километража (вызывается из DetectScreen)
+
   static Future<void> addDistanceMeters(double meters) async {
     if (meters <= 0) return;
     final prefs = await SharedPreferences.getInstance();
@@ -388,7 +388,7 @@ class AchievementService {
     await _saveRawProgress(progress);
   }
 
-  /// Синхронизация достижений при успешной отправке ямы на сервер
+
   static Future<void> syncDefectsProgress(int count) async {
     final progress = await _loadRawProgress();
     if (count >= 1) {
@@ -399,7 +399,7 @@ class AchievementService {
     await _saveRawProgress(progress);
   }
 
-  /// Зачёт достижения «Знаю свою машину» (вызывается из AccountScreen)
+
   static Future<void> checkCarProfile({
     required String model,
     required String tires,
@@ -413,7 +413,7 @@ class AchievementService {
     }
   }
 
-  /// Инкремент произвольного достижения
+
   static Future<void> increment(String id, [int delta = 1]) async {
     final progress = await _loadRawProgress();
     progress[id] = (progress[id] ?? 0) + delta;

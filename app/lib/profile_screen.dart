@@ -236,7 +236,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     colors,
                     defectsVal,
                     "Дефектов найдено",
-                    "зачтено сервером",
+                    stats.potholes + stats.roughRoads > 0
+                        ? "ям: ${stats.potholes} · тряска: ${stats.roughRoads}"
+                        : "зачтено сервером",
                     colors.s1,
                   ),
                   const SizedBox(width: 8),
@@ -796,7 +798,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             ? data.days[index]
                             : null;
                         final level = dayItem?.level ?? 0;
-                        final count = dayItem?.count ?? 0;
                         final isToday = dayItem?.isToday ?? false;
 
                         String tooltipText;
@@ -805,11 +806,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         } else {
                           final dateStr =
                               "${dayItem.date.day.toString().padLeft(2, '0')}.${dayItem.date.month.toString().padLeft(2, '0')}";
-                          if (count == 0) {
-                            tooltipText = "$dateStr: не заходил";
-                          } else {
-                            tooltipText = "$dateStr: ${_formatVisits(count)}";
-                          }
+                          tooltipText = level == 0
+                              ? "$dateStr: без поездок"
+                              : "$dateStr: ${_formatDayActivity(dayItem)}";
                           if (isToday) {
                             tooltipText = "Сегодня ($tooltipText)";
                           }
@@ -834,9 +833,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          data.totalVisits == 0
-                              ? "НЕТ ВХОДОВ"
-                              : "ВХОДОВ: ${data.totalVisits} (${data.activeDays}/28 ДН)",
+                          data.activeDays == 0
+                              ? "НЕТ ПОЕЗДОК ЗА 28 ДНЕЙ"
+                              : "АКТИВНЫХ ДНЕЙ: ${data.activeDays}/28 · ${_formatDayKm(data.totalMeters)}",
                           style: TextStyle(
                             fontFamily: AppTheme.fontMono,
                             fontSize: 8.5,
@@ -908,19 +907,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return "$streak ДНЕЙ ПОДРЯД";
   }
 
-  static String _formatVisits(int count) {
-    final mod10 = count % 10;
-    final mod100 = count % 100;
-    if (mod100 >= 11 && mod100 <= 14) {
-      return "$count входов";
-    }
-    if (mod10 == 1) {
-      return "$count вход";
-    }
-    if (mod10 >= 2 && mod10 <= 4) {
-      return "$count входа";
-    }
-    return "$count входов";
+  static String _formatDayKm(double meters) {
+    return "${(meters / 1000).toStringAsFixed(1).replaceAll('.', ',')} КМ";
+  }
+
+  static String _formatDayActivity(DayActivity day) {
+    return [
+      if (day.meters > 0) _formatDayKm(day.meters).toLowerCase(),
+      if (day.count > 0) "дефектов: ${day.count}",
+    ].join(' · ');
   }
 }
 

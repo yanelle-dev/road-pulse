@@ -19,16 +19,22 @@ const (
 	maxErrorBodyBytes  = 512
 )
 
-// Provider описывает интерфейс отправки сервисных SMS-сообщений
+
 type Provider interface {
 	SendCode(ctx context.Context, phone, code string) error
 }
 
-// MockProvider логирует код в консоль/журнал (режим разработки и тестирования)
+
 type MockProvider struct{}
 
 func NewMockProvider() *MockProvider {
 	return &MockProvider{}
+}
+
+
+func IsMock(p Provider) bool {
+	_, ok := p.(*MockProvider)
+	return ok
 }
 
 func (m *MockProvider) SendCode(ctx context.Context, phone, code string) error {
@@ -38,8 +44,8 @@ func (m *MockProvider) SendCode(ctx context.Context, phone, code string) error {
 	return nil
 }
 
-// GateProvider отправляет SMS через SMS Gateway for Android (облако api.sms-gate.app
-// или локальный сервер на телефоне): сообщение уходит с SIM-карты этого телефона.
+
+
 type GateProvider struct {
 	baseURL  string
 	user     string
@@ -85,8 +91,8 @@ func (g *GateProvider) SendCode(ctx context.Context, phone, code string) error {
 	return nil
 }
 
-// NewProvider выбирает GateProvider при заданных SMS_GATE_USER/SMS_GATE_PASSWORD.
-// В production запуск без них запрещён: тихий фолбэк на вывод кодов в лог открыл бы вход всем.
+
+
 func NewProvider(cfg *config.Config) Provider {
 	if cfg.SMSGateUser != "" && cfg.SMSGatePassword != "" {
 		return NewGateProvider(cfg.SMSGateURL, cfg.SMSGateUser, cfg.SMSGatePassword)

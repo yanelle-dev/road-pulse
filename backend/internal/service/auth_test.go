@@ -45,7 +45,7 @@ func TestHashString(t *testing.T) {
 
 func TestJWTAccessToken(t *testing.T) {
 	secret := "test_secret_key_with_sufficient_length_for_hmac_256"
-	s := NewAuthService(nil, secret, nil)
+	s := NewAuthService(nil, secret, nil, false, "Europe/Moscow")
 
 	userID := "usr_test_12345"
 	phone := "+79991234567"
@@ -58,7 +58,7 @@ func TestJWTAccessToken(t *testing.T) {
 		t.Fatal("expected non-empty token string")
 	}
 
-	// Валидный токен
+
 	sub, err := s.ValidateAccessToken(tokenStr)
 	if err != nil {
 		t.Fatalf("ValidateAccessToken failed on valid token: %v", err)
@@ -67,8 +67,8 @@ func TestJWTAccessToken(t *testing.T) {
 		t.Errorf("got sub %q, want %q", sub, userID)
 	}
 
-	// Токен с другим секретом
-	sWrong := NewAuthService(nil, "completely_different_secret_key_here", nil)
+
+	sWrong := NewAuthService(nil, "completely_different_secret_key_here", nil, false, "Europe/Moscow")
 	_, err = sWrong.ValidateAccessToken(tokenStr)
 	if err == nil {
 		t.Error("expected validation to fail with wrong secret, but it succeeded")
@@ -76,13 +76,13 @@ func TestJWTAccessToken(t *testing.T) {
 }
 
 func TestRatingFormula(t *testing.T) {
-	// (Км * 10) + (Дефекты * 50) + (Награды * 100) + (Серия * 20)
+
 	km := 12.34
 	defects := 5
 	awards := 3
 	streak := 7
 
-	expected := 123 + (5 * 50) + (3 * 100) + (7 * 20) // 123 + 250 + 300 + 140 = 813
+	expected := 123 + (5 * 50) + (3 * 100) + (7 * 20)
 
 	calculated := int(math.Round(km*10)) + (defects * 50) + (awards * 100) + (streak * 20)
 	if calculated != expected {

@@ -18,20 +18,20 @@ const (
 	requestTimeout = 5 * time.Second
 	maxBodyBytes   = 1 << 20
 
-	// Дальше этого расстояния точка скорее вне дорожного графа (двор, парковка):
-	// привязка к ближайшей дороге исказила бы координаты.
+
+
 	nearestMaxSnapMeters = 40
-	// Допуск курса: сегмент дороги выбирается по направлению движения, а не только по расстоянию.
+
 	nearestBearingRange = 45
-	// Дефолт OSRM — 5 м, что меньше типичной погрешности GPS в городе.
+
 	matchRadiusMeters = 25
 
 	breakerFailThreshold = 5
 	breakerOpenFor       = 30 * time.Second
 )
 
-// breaker отключает OSRM на время, если публичный сервер лежит или режет частоту:
-// иначе каждый приём телеметрии ждал бы полный таймаут.
+
+
 type breaker struct {
 	mu        sync.Mutex
 	fails     int
@@ -58,10 +58,10 @@ func (b *breaker) record(ok bool) {
 	}
 }
 
-// Snap — результат привязки точки к дорожному графу.
+
 type Snap struct {
 	Lat, Lon float64
-	Name     string // название дороги; пусто, если OSRM его не знает или привязки не было
+	Name     string
 }
 
 type Client struct {
@@ -77,8 +77,8 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
-// get возвращает тело ответа и статус. 400 (NoSegment/NoMatch) — штатный ответ OSRM,
-// а не сбой сервиса, поэтому на состояние breaker он не влияет.
+
+
 func (c *Client) get(ctx context.Context, url string) ([]byte, int, bool) {
 	if !c.breaker.allow() {
 		return nil, 0, false
@@ -106,9 +106,9 @@ func (c *Client) get(ctx context.Context, url string) ([]byte, int, bool) {
 	return body, resp.StatusCode, true
 }
 
-// Nearest привязывает одиночную точку к дорожному графу. С курсом сначала ищется
-// сегмент по направлению движения (параллельные дороги, эстакады, съезды), затем — любой.
-// При сбое или слишком далёкой дороге возвращаются исходные координаты, чтобы не терять попадание.
+
+
+
 func (c *Client) Nearest(ctx context.Context, lat, lon float64, headingDeg *float64) Snap {
 	if headingDeg != nil {
 		bearing := (int(math.Round(*headingDeg))%360 + 360) % 360
@@ -133,7 +133,7 @@ func (c *Client) nearest(ctx context.Context, lat, lon float64, extraQuery strin
 	var data struct {
 		Code      string `json:"code"`
 		Waypoints []struct {
-			Location []float64 `json:"location"` // [lon, lat]
+			Location []float64 `json:"location"`
 			Distance float64   `json:"distance"`
 			Name     string    `json:"name"`
 		} `json:"waypoints"`
@@ -149,8 +149,8 @@ func (c *Client) nearest(ctx context.Context, lat, lon float64, extraQuery strin
 	return Snap{Lat: wp.Location[1], Lon: wp.Location[0], Name: strings.TrimSpace(wp.Name)}, true
 }
 
-// Match выполняет map-matching трека и возвращает самую частую в треке дорогу.
-// OSRM требует строго возрастающих timestamps, поэтому точки в одну секунду разводятся на +1 с.
+
+
 func (c *Client) Match(ctx context.Context, trajectory []models.TrajectoryPoint) (wkt, geomType, roadName string, ok bool) {
 	if len(trajectory) < 2 {
 		return "", "", "", false
@@ -193,13 +193,13 @@ func (c *Client) Match(ctx context.Context, trajectory []models.TrajectoryPoint)
 		} `json:"matchings"`
 		Tracepoints []*struct {
 			Name string `json:"name"`
-		} `json:"tracepoints"` // непривязанные точки приходят как null
+		} `json:"tracepoints"`
 	}
 	if err := json.Unmarshal(body, &data); err != nil || data.Code != "Ok" {
 		return "", "", "", false
 	}
 
-	// Трек может распасться на несколько сегментов; берём самый длинный.
+
 	var best [][]float64
 	for _, m := range data.Matchings {
 		if m.Geometry.Type != "LineString" {

@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Connect инициализирует пул соединений с PostgreSQL/PostGIS
+
 func Connect(ctx context.Context, dbURL string) (*pgxpool.Pool, error) {
 	poolConfig, err := pgxpool.ParseConfig(dbURL)
 	if err != nil {
@@ -34,7 +34,7 @@ func Connect(ctx context.Context, dbURL string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// InitSchema применяет расширение PostGIS, создает таблицы telemetry, users, otp_codes, refresh_tokens, trips, defect_comments
+
 func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	queries := []string{
 		"CREATE EXTENSION IF NOT EXISTS postgis;",
@@ -56,16 +56,16 @@ func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS raw_bump_force DOUBLE PRECISION;",
 		"ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS severity SMALLINT;",
 		"ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS road_name VARCHAR(120);",
-		// Старые строки получают серьёзность по прежним порогам нормализованной силы.
+
 		"UPDATE telemetry SET severity = CASE WHEN bump_force > 30 THEN 3 WHEN bump_force > 20 THEN 2 ELSE 1 END WHERE severity IS NULL;",
-		// Идемпотентность в рамках пользователя: чужой client_event_id не должен возвращать чужую запись.
-		// NULL-значения в UNIQUE различны, поэтому старые строки и клиенты без id не конфликтуют.
+
+
 		"DROP INDEX IF EXISTS ux_telemetry_client_event_id;",
 		"CREATE UNIQUE INDEX IF NOT EXISTS ux_telemetry_user_event ON telemetry(user_id, client_event_id);",
 		"CREATE INDEX IF NOT EXISTS idx_telemetry_user_type_time ON telemetry(user_id, defect_type, timestamp DESC);",
 		"CREATE INDEX IF NOT EXISTS idx_telemetry_type_time ON telemetry(defect_type, timestamp DESC);",
 
-		// Таблицы подсистемы авторизации
+
 		`CREATE TABLE IF NOT EXISTS users (
 			id VARCHAR(64) PRIMARY KEY,
 			phone VARCHAR(32) UNIQUE NOT NULL,
@@ -98,7 +98,7 @@ func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);`,
 
-		// Таблица поездок
+
 		`CREATE TABLE IF NOT EXISTS trips (
 			id BIGSERIAL PRIMARY KEY,
 			user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -114,7 +114,7 @@ func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"CREATE INDEX IF NOT EXISTS idx_trips_user_id ON trips(user_id);",
 		"CREATE INDEX IF NOT EXISTS idx_trips_started_at ON trips(started_at DESC);",
 
-		// Таблица комментариев к дефектам
+
 		`CREATE TABLE IF NOT EXISTS defect_comments (
 			id BIGSERIAL PRIMARY KEY,
 			cluster_id BIGINT NOT NULL,
@@ -126,11 +126,48 @@ func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"CREATE INDEX IF NOT EXISTS idx_defect_comments_cluster_id ON defect_comments(cluster_id);",
 	}
 
+	queries = append(queries, activitySchema...)
+
 	for _, query := range queries {
 		if _, err := pool.Exec(ctx, query); err != nil {
 			return fmt.Errorf("ошибка выполнения миграции (%s): %w", query, err)
 		}
 	}
 
+	return nil
+}
+
+
+
+var activitySchema = []string{
+	`CREATE TABLE IF NOT EXISTS user_activity_days (
+		user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		day DATE NOT NULL,
+		distance_meters DOUBLE PRECISION NOT NULL DEFAULT 0,
+		PRIMARY KEY (user_id, day)
+	);`,
+	`CREATE TABLE IF NOT EXISTS distance_batches (
+		user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		batch_id VARCHAR(64) NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, batch_id)
+	);`,
+	`DELETE FROM distance_batches WHERE created_at < NOW() - INTERVAL '30 days';`,
+}
+
+
+
+func BackfillActivity(ctx context.Context, pool *pgxpool.Pool, tz string) error {
+	_, err := pool.Exec(ctx, `
+		INSERT INTO user_activity_days (user_id, day, distance_meters)
+		SELECT user_id, (started_at AT TIME ZONE $1)::date, SUM(distance_meters)
+		FROM trips
+		WHERE distance_meters > 0
+		GROUP BY 1, 2
+		ON CONFLICT DO NOTHING;
+	`, tz)
+	if err != nil {
+		return fmt.Errorf("ошибка переноса пробега поездок в дни активности: %w", err)
+	}
 	return nil
 }

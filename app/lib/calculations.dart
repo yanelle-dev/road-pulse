@@ -1,10 +1,11 @@
-/// Единые константы и чистые расчетные функции приложения «Дорожный пульс»
 library;
+
+import 'dart:math' as math;
 
 import 'constants.dart';
 
-/// Расчёт очков рейтинга пользователя по регламентной формуле:
-/// (Км * 10) + (Дефекты * 50) + (Награды * 100) + (Серия * 20)
+
+
 int ratingFor(double km, int defects, int awards, int streak) {
   return (km * 10).round() +
       (defects * 50) +
@@ -33,7 +34,7 @@ String communityBadgeText(int rating, {int? percentile}) {
   return "Новый участник";
 }
 
-/// Проверка допустимости шага перемещения для учёта одометром
+
 bool isCountableStep(double distanceM, double accuracyM) {
   if (accuracyM > kOdometerMaxAccuracyM) {
     return false;
@@ -41,8 +42,8 @@ bool isCountableStep(double distanceM, double accuracyM) {
   return distanceM >= kOdometerMinStepM && distanceM < kOdometerMaxStepM;
 }
 
-/// Серьёзность дефекта: 1 — ровно, 2 — заметно, 3 — жёстко.
-/// Сервер присылает `severity`; для ответов старого сервера считаем по нормализованной силе.
+
+
 int defectSeverity(Map<String, dynamic> defect) {
   final severity = defect['severity'];
   if (severity is num) return severity.toInt().clamp(1, 3);
@@ -53,7 +54,7 @@ int defectSeverity(Map<String, dynamic> defect) {
   return 1;
 }
 
-/// Безопасный парсинг даты дефекта с переводом в локальный часовой пояс
+
 DateTime parseDefectDate(dynamic rawDate) {
   if (rawDate != null) {
     final parsed = DateTime.tryParse(rawDate.toString());
@@ -64,22 +65,86 @@ DateTime parseDefectDate(dynamic rawDate) {
   return DateTime.now();
 }
 
-/// Проверка попадания даты дефекта в выбранный фильтр периода:
-/// 0 — Сегодня, 1 — Неделя (<= 7 дней), 2 — Месяц (<= 30 дней), 3 — Всё время
+
+
 bool isDateInFilterPeriod(DateTime defectDate, DateTime now, int filterIndex) {
   switch (filterIndex) {
-    case 0: // Сегодня
+    case 0:
       return defectDate.year == now.year &&
           defectDate.month == now.month &&
           defectDate.day == now.day;
-    case 1: // Неделя
+    case 1:
       final diff = now.difference(defectDate);
       return diff.inDays <= 7 && !diff.isNegative;
-    case 2: // Месяц
+    case 2:
       final diff = now.difference(defectDate);
       return diff.inDays <= 30 && !diff.isNegative;
-    case 3: // Всё время
+    case 3:
     default:
       return true;
   }
+}
+
+
+({double x, double y}) mercatorPixel(double lat, double lon, int zoom) {
+  final scale = 256.0 * (1 << zoom);
+  final rad = lat.clamp(-85.05112878, 85.05112878) * math.pi / 180;
+  return (
+    x: (lon + 180) / 360 * scale,
+    y: (1 - math.log(math.tan(rad) + 1 / math.cos(rad)) / math.pi) / 2 * scale,
+  );
+}
+
+class GridCluster {
+  const GridCluster({
+    required this.lat,
+    required this.lon,
+    required this.count,
+    required this.maxSeverity,
+  });
+
+  final double lat;
+  final double lon;
+  final int count;
+  final int maxSeverity;
+}
+
+
+List<GridCluster> clusterByGrid(
+  Iterable<({double lat, double lon, int severity})> points, {
+  required int zoom,
+  required double cellPx,
+}) {
+  final cells = <(int, int), ({double lat, double lon, int count, int maxSeverity})>{};
+  for (final p in points) {
+    final px = mercatorPixel(p.lat, p.lon, zoom);
+    final key = ((px.x / cellPx).floor(), (px.y / cellPx).floor());
+    final c = cells[key];
+    cells[key] = c == null
+        ? (lat: p.lat, lon: p.lon, count: 1, maxSeverity: p.severity)
+        : (
+            lat: c.lat + p.lat,
+            lon: c.lon + p.lon,
+            count: c.count + 1,
+            maxSeverity: math.max(c.maxSeverity, p.severity),
+          );
+  }
+  return [
+    for (final c in cells.values)
+      GridCluster(
+        lat: c.lat / c.count,
+        lon: c.lon / c.count,
+        count: c.count,
+        maxSeverity: c.maxSeverity,
+      ),
+  ];
+}
+
+
+int activityLevel(double meters, int defects) {
+  final km = meters / 1000.0;
+  if (km >= kActivityHighKm || defects >= kActivityHighDefects) return 3;
+  if (km >= kActivityMidKm || defects >= kActivityMidDefects) return 2;
+  if (meters > 0 || defects > 0) return 1;
+  return 0;
 }

@@ -40,7 +40,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Println("Подключение к PostGIS...") // DSN с паролем в лог не пишем
+	log.Println("Подключение к PostGIS...")
 	pool, err := database.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: невозможно подключиться к БД: %v", err)
@@ -51,15 +51,18 @@ func main() {
 		log.Fatalf("Ошибка применения схемы БД: %v", err)
 	}
 	log.Println("Схема PostGIS, таблицы телеметрии и авторизации успешно готовы")
+	if err := database.BackfillActivity(ctx, pool, cfg.ActivityTZ); err != nil {
+		log.Printf("Предупреждение: %v", err)
+	}
 
-	// Сервисы
+
 	osrmClient := osrm.NewClient(cfg.OSRMBase)
-	telemetryService := service.NewTelemetryService(pool, osrmClient)
+	telemetryService := service.NewTelemetryService(pool, osrmClient, cfg.ActivityTZ)
 	smsProvider := sms.NewProvider(cfg)
-	authService := service.NewAuthService(pool, cfg.JWTSecret, smsProvider)
+	authService := service.NewAuthService(pool, cfg.JWTSecret, smsProvider, cfg.ExposeOTP, cfg.ActivityTZ)
 	tripService := service.NewTripService(pool)
 
-	// Обработчики
+
 	telemetryHandler := handler.NewTelemetryHandler(telemetryService)
 	authHandler := handler.NewAuthHandler(authService)
 	tripHandler := handler.NewTripHandler(tripService)
@@ -76,7 +79,7 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
-	// Проверка здоровья
+
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		var version string
@@ -90,14 +93,14 @@ func main() {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Роуты авторизации и профиля
+
 		r.Route("/auth", func(r chi.Router) {
 			r.With(codeLimit).Post("/request-code", authHandler.RequestCode)
 			r.With(verifyLimit).Post("/verify-code", authHandler.VerifyCode)
 			r.Post("/refresh", authHandler.Refresh)
 			r.Post("/logout", authHandler.Logout)
 
-			// Защищённые методы профиля
+
 			r.Group(func(r chi.Router) {
 				r.Use(handler.RequireAuth(authService))
 				r.Get("/me", authHandler.GetMe)
@@ -107,7 +110,7 @@ func main() {
 			})
 		})
 
-		// Поездки пользователя
+
 		r.Route("/trips", func(r chi.Router) {
 			r.Use(handler.RequireAuth(authService), tripLimit)
 			r.Post("/start", tripHandler.StartTrip)
@@ -115,7 +118,7 @@ func main() {
 			r.Get("/last", tripHandler.GetLastTrip)
 		})
 
-		// Телеметрия и комментарии
+
 		r.Group(func(r chi.Router) {
 			r.Use(handler.RequireAuth(authService))
 			r.With(commentLimit).Post("/telemetry/comments", telemetryHandler.PostComment)

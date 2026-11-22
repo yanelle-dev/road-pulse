@@ -22,12 +22,12 @@ func (h *AuthHandler) RequestCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	retryAfter, err := h.service.RequestCode(r.Context(), payload.Phone)
+	resp, err := h.service.RequestCode(r.Context(), payload.Phone)
 	if err != nil {
 		respondError(w, err)
 		return
 	}
-	respondJSON(w, http.StatusOK, map[string]any{"status": "code_sent", "retry_after": retryAfter})
+	respondJSON(w, http.StatusOK, resp)
 }
 
 func (h *AuthHandler) VerifyCode(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +109,7 @@ func (h *AuthHandler) SyncStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.service.SyncStats(r.Context(), userIDFrom(r), payload.StreakDays, payload.UnlockedAchievements)
+	user, err := h.service.SyncStats(r.Context(), userIDFrom(r), payload.UnlockedAchievements)
 	if err != nil {
 		respondError(w, err)
 		return

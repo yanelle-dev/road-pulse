@@ -39,9 +39,14 @@ const (
 	maxProfileTextRunes = 100
 	maxCarClearance     = 600
 
-	// Значения приходят с клиента и входят в рейтинг, поэтому ограничены правдоподобным максимумом.
+
 	MaxStreakDays   = 3650
 	MaxAchievements = 30
+
+
+	ActivityWindowDays = 28
+
+	streakLookbackDays = 366
 
 	minJWTSecretLen = 32
 )
@@ -59,12 +64,15 @@ var (
 )
 
 type AuthService struct {
-	pool      *pgxpool.Pool
-	jwtSecret []byte
-	sms       sms.Provider
+	pool       *pgxpool.Pool
+	jwtSecret  []byte
+	sms        sms.Provider
+	exposeOTP  bool
+	activityTZ string
 }
 
-func NewAuthService(pool *pgxpool.Pool, secret string, smsProvider sms.Provider) *AuthService {
+
+func NewAuthService(pool *pgxpool.Pool, secret string, smsProvider sms.Provider, exposeOTP bool, activityTZ string) *AuthService {
 	if secret == "" {
 		log.Println("JWT_SECRET не задан! Использован временный ключ для разработки.")
 		secret = "dev_only_road_pulse_jwt_secret_key_insecure"
@@ -74,10 +82,16 @@ func NewAuthService(pool *pgxpool.Pool, secret string, smsProvider sms.Provider)
 	if smsProvider == nil {
 		smsProvider = sms.NewMockProvider()
 	}
+	exposeOTP = exposeOTP && sms.IsMock(smsProvider)
+	if exposeOTP {
+		log.Println("⚠️ EXPOSE_OTP: код входа возвращается в ответе request-code. Только для разработки.")
+	}
 	return &AuthService{
-		pool:      pool,
-		jwtSecret: []byte(secret),
-		sms:       smsProvider,
+		pool:       pool,
+		jwtSecret:  []byte(secret),
+		sms:        smsProvider,
+		exposeOTP:  exposeOTP,
+		activityTZ: activityTZ,
 	}
 }
 
@@ -86,14 +100,14 @@ func (s *AuthService) hashString(input string) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// hashOTP — HMAC с секретом и номером: четырёхзначный код без соли подбирается из дампа БД мгновенно.
+
 func (s *AuthService) hashOTP(phone, code string) string {
 	mac := hmac.New(sha256.New, s.jwtSecret)
 	mac.Write([]byte(phone + ":" + code))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// normalizePhone оставляет только цифры, приводит российское «8…» к «+7…» и добавляет «+».
+
 func (s *AuthService) normalizePhone(phone string) string {
 	var sb strings.Builder
 	for _, ch := range phone {
@@ -124,18 +138,18 @@ func generateOTP() (string, error) {
 	return fmt.Sprintf("%04d", n.Int64()), nil
 }
 
-// RequestCode выпускает код и возвращает паузу до повторной отправки (секунды).
-// Окно повтора проверяется атомарно прямо в UPSERT; после исчерпания попыток ввода
-// новый код выдаётся только через otpLockoutMinutes, иначе короткий код перебирается.
-func (s *AuthService) RequestCode(ctx context.Context, rawPhone string) (int, error) {
+
+
+
+func (s *AuthService) RequestCode(ctx context.Context, rawPhone string) (*models.RequestCodeResponse, error) {
 	phone := s.normalizePhone(rawPhone)
 	if !validPhone(phone) {
-		return 0, ErrInvalidPhone
+		return nil, ErrInvalidPhone
 	}
 
 	code, err := generateOTP()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	query := `
@@ -156,26 +170,31 @@ func (s *AuthService) RequestCode(ctx context.Context, rawPhone string) (int, er
 		otpMaxAttempts, otpLockoutMinutes, float64(otpResendSeconds),
 	)
 	if err != nil {
-		return 0, fmt.Errorf("ошибка сохранения OTP: %w", err)
+		return nil, fmt.Errorf("ошибка сохранения OTP: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		var attempts int
 		_ = s.pool.QueryRow(ctx, `SELECT attempts FROM otp_codes WHERE phone = $1;`, phone).Scan(&attempts)
 		if attempts >= otpMaxAttempts {
-			return 0, ErrOTPLocked
+			return nil, ErrOTPLocked
 		}
-		return 0, ErrRateLimited
+		return nil, ErrRateLimited
 	}
 
 	if err := s.sms.SendCode(ctx, phone, code); err != nil {
 		_, _ = s.pool.Exec(ctx, `DELETE FROM otp_codes WHERE phone = $1;`, phone)
-		return 0, fmt.Errorf("ошибка отправки SMS: %w", err)
+		return nil, fmt.Errorf("ошибка отправки SMS: %w", err)
 	}
-	return otpResendSeconds, nil
+
+	resp := &models.RequestCodeResponse{Status: "code_sent", RetryAfter: otpResendSeconds}
+	if s.exposeOTP {
+		resp.Code = code
+	}
+	return resp, nil
 }
 
-// VerifyCode списывает попытку одним UPDATE до сравнения: параллельные запросы
-// не могут обойти лимит попыток.
+
+
 func (s *AuthService) VerifyCode(ctx context.Context, rawPhone, code string) (*models.AuthResponse, error) {
 	phone := s.normalizePhone(rawPhone)
 	code = strings.TrimSpace(code)
@@ -233,7 +252,7 @@ func (s *AuthService) VerifyCode(ctx context.Context, rawPhone, code string) (*m
 	}, nil
 }
 
-// findOrCreateUser: ON CONFLICT закрывает гонку двух одновременных входов нового номера.
+
 func (s *AuthService) findOrCreateUser(ctx context.Context, phone string) (string, bool, error) {
 	newID := "usr_" + s.hashString(phone+fmt.Sprintf("%d", time.Now().UnixNano()))[:16]
 	var id, name, city string
@@ -269,7 +288,7 @@ func (s *AuthService) generateRefreshToken(ctx context.Context, userID string) (
 	tokenStr := hex.EncodeToString(bytes)
 	tokenHash := s.hashString(tokenStr)
 
-	// Отозванные токены живут ещё неделю: два изолята приложения могут обновиться одновременно.
+
 	_, _ = s.pool.Exec(ctx, `
 		DELETE FROM refresh_tokens
 		WHERE user_id = $1 AND (revoked OR expires_at < NOW())
@@ -286,7 +305,7 @@ func (s *AuthService) generateRefreshToken(ctx context.Context, userID string) (
 	return tokenStr, nil
 }
 
-// Refresh ротирует токен; отзыв — одним условным UPDATE, поэтому один refresh не обменять дважды.
+
 func (s *AuthService) Refresh(ctx context.Context, oldRefreshToken string) (*models.AuthResponse, error) {
 	var userID string
 	err := s.pool.QueryRow(ctx, `
@@ -345,7 +364,7 @@ func (s *AuthService) ValidateAccessToken(tokenStr string) (string, error) {
 	return sub, nil
 }
 
-// getUser читает только строку users, без статистики: тяжёлые подсчёты нужны одному GetProfile.
+
 func (s *AuthService) getUser(ctx context.Context, userID string) (*models.UserProfile, error) {
 	var user models.UserProfile
 	err := s.pool.QueryRow(ctx, `
@@ -374,8 +393,16 @@ func (s *AuthService) GetProfile(ctx context.Context, userID string) (*models.Us
 	}
 
 	var defectsCount int
-	_ = s.pool.QueryRow(ctx, `SELECT COUNT(*)::int FROM telemetry WHERE user_id = $1;`, userID).Scan(&defectsCount)
+	_ = s.pool.QueryRow(ctx, `
+		SELECT COUNT(*)::int, COUNT(*) FILTER (WHERE defect_type = 'rough_road')::int
+		FROM telemetry WHERE user_id = $1;
+	`, userID).Scan(&defectsCount, &user.RoughRoadCount)
 	user.TotalDefects = defectsCount
+	user.PotholeCount = defectsCount - user.RoughRoadCount
+
+	if err := s.loadActivity(ctx, user); err != nil {
+		return nil, err
+	}
 
 	km := user.TotalDistanceMeters / 1000.0
 	user.Rating = int(math.Round(km*10)) +
@@ -456,15 +483,15 @@ func (s *AuthService) UpdateProfile(ctx context.Context, userID string, p *model
 	return s.GetProfile(ctx, userID)
 }
 
-func (s *AuthService) SyncStats(ctx context.Context, userID string, streakDays, unlockedAchievements int) (*models.UserProfile, error) {
-	streakDays = min(max(streakDays, 0), MaxStreakDays)
+
+func (s *AuthService) SyncStats(ctx context.Context, userID string, unlockedAchievements int) (*models.UserProfile, error) {
 	unlockedAchievements = min(max(unlockedAchievements, 0), MaxAchievements)
 
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE users
-		SET streak_days = $1, unlocked_achievements = $2
-		WHERE id = $3;
-	`, streakDays, unlockedAchievements, userID)
+		SET unlocked_achievements = $1
+		WHERE id = $2;
+	`, unlockedAchievements, userID)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка синхронизации статистики пользователя: %w", err)
 	}
@@ -498,4 +525,88 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
 	}
 	_, err := s.pool.Exec(ctx, `UPDATE refresh_tokens SET revoked = true WHERE token_hash = $1;`, s.hashString(refreshToken))
 	return err
+}
+
+
+
+func (s *AuthService) loadActivity(ctx context.Context, user *models.UserProfile) error {
+	rows, err := s.pool.Query(ctx, `
+		WITH bounds AS (
+			SELECT (NOW() AT TIME ZONE $2)::date AS today
+		),
+		dist AS (
+			SELECT a.day, a.distance_meters
+			FROM user_activity_days a, bounds b
+			WHERE a.user_id = $1 AND a.day > b.today - $3::int AND a.distance_meters > 0
+		),
+		defects AS (
+			SELECT (t."timestamp" AT TIME ZONE $2)::date AS day, COUNT(*)::int AS n
+			FROM telemetry t, bounds b
+			WHERE t.user_id = $1 AND t."timestamp" >= (b.today - $3::int)::timestamp AT TIME ZONE $2
+			GROUP BY 1
+		)
+		SELECT COALESCE(d.day, f.day), COALESCE(d.distance_meters, 0), COALESCE(f.n, 0), (SELECT today FROM bounds)
+		FROM dist d
+		FULL JOIN defects f ON f.day = d.day;
+	`, user.ID, s.activityTZ, streakLookbackDays)
+	if err != nil {
+		return fmt.Errorf("ошибка чтения дней активности: %w", err)
+	}
+	defer rows.Close()
+
+	var days []models.ActivityDay
+	var today time.Time
+	for rows.Next() {
+		var day models.ActivityDay
+		var date time.Time
+		if err := rows.Scan(&date, &day.DistanceMeters, &day.Defects, &today); err != nil {
+			return fmt.Errorf("ошибка разбора дня активности: %w", err)
+		}
+		day.Date = date.Format(time.DateOnly)
+		days = append(days, day)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("ошибка чтения дней активности: %w", err)
+	}
+	if today.IsZero() {
+		today = time.Now()
+	}
+
+	streak := ActivityStreak(days, today)
+	windowStart := today.AddDate(0, 0, -(ActivityWindowDays - 1)).Format(time.DateOnly)
+	user.ActivityDays = []models.ActivityDay{}
+	for _, d := range days {
+		if d.Date >= windowStart {
+			user.ActivityDays = append(user.ActivityDays, d)
+		}
+	}
+
+	if streak != user.StreakDays {
+		if _, err := s.pool.Exec(ctx, `UPDATE users SET streak_days = $1 WHERE id = $2;`, streak, user.ID); err != nil {
+			return fmt.Errorf("ошибка сохранения серии: %w", err)
+		}
+		user.StreakDays = streak
+	}
+	return nil
+}
+
+
+
+func ActivityStreak(days []models.ActivityDay, today time.Time) int {
+	active := make(map[string]bool, len(days))
+	for _, d := range days {
+		if d.DistanceMeters > 0 || d.Defects > 0 {
+			active[d.Date] = true
+		}
+	}
+	day := today
+	if !active[day.Format(time.DateOnly)] {
+		day = day.AddDate(0, 0, -1)
+	}
+	streak := 0
+	for active[day.Format(time.DateOnly)] {
+		streak++
+		day = day.AddDate(0, 0, -1)
+	}
+	return streak
 }

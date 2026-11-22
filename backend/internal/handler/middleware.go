@@ -13,7 +13,7 @@ type contextKey string
 
 const ContextUserIDKey contextKey = "user_id"
 
-// RequireAuth проверяет Bearer-токен. Если токен недействителен, возвращает 401
+
 func RequireAuth(authService *service.AuthService) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +40,7 @@ func RequireAuth(authService *service.AuthService) func(http.Handler) http.Handl
 	}
 }
 
-// OptionalAuth извлекает userID, если токен передан, но не блокирует гостевые запросы
+
 func OptionalAuth(authService *service.AuthService) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

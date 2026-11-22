@@ -22,41 +22,42 @@ const (
 	MinSpeedKMH  = 20.0
 	BaseSpeedKMH = 20.0
 
-	// ClusterEpsMeters — радиус DBSCAN в метрах (в проекции 3857 с поправкой на широту).
-	// minpoints = 1 даёт цепочки: при 20 м соседние ямы вдоль плохой дороги сливались в один «дефект»,
-	// поэтому радиус не больше типичной погрешности привязанной к дороге точки.
+
+
+
 	ClusterEpsMeters = 12.0
-	// ClusterMaxAgeDays — старые данные не участвуют в кластерах (ямы ремонтируют).
+
 	ClusterMaxAgeDays = 180
-	// RoughClusterIDOffset — смещение cluster_id для rough_road.
+
 	RoughClusterIDOffset int64 = 100000000
 
 	MaxSpeedKMH            = 300.0
 	MaxBumpForce           = 200.0
 	MaxTrajectoryPoints    = 50
 	MaxDistanceBatchMeters = 5000.0
+	MaxDistanceBatchIDLen  = 64
 	MaxCommentRunes        = 1000
 	MaxClientEventIDLen    = 64
 	MaxAccuracyM           = 1000.0
 	MaxRoadNameRunes       = 120
 
-	// Шкала серьёзности дублирует клиент (app/lib/constants.dart, detection.dart):
-	// сила удара сравнивается с порогом обнаружения для этой скорости, поэтому оценка не зависит от скорости.
+
+
 	BumpBaseThresholdMs2 = 7.0
 	BumpSpeedFactor      = 0.12
 	RoughRmsThresholdMs2 = 1.5
-	RoughForceScale      = 5.0 // bump_force участка тряски = среднее RMS × RoughForceScale
+	RoughForceScale      = 5.0
 	SeverityMediumRatio  = 2.0
 	SeverityHardRatio    = 3.5
 
-	// Повторный проезд той же ямы тем же пользователем в этом окне не создаёт новую запись:
-	// иначе рейтинг и «подтверждения» можно накрутить, ездя туда-обратно.
+
+
 	DedupRadiusMeters  = 15.0
 	DedupWindowMinutes = 120
 
-	// ClusterCacheTTL — GET /telemetry отдаёт кэш: полный DBSCAN по таблице на каждый запрос дорог.
+
 	ClusterCacheTTL = 15 * time.Second
-	// EventTimeMaxAge / EventTimeMaxFuture — допустимое окно для времени события с устройства.
+
 	EventTimeMaxAge    = 48 * time.Hour
 	EventTimeMaxFuture = 5 * time.Minute
 )
@@ -74,15 +75,17 @@ type clusterCache struct {
 }
 
 type TelemetryService struct {
-	pool  *pgxpool.Pool
-	osrm  *osrm.Client
-	cache clusterCache
+	pool       *pgxpool.Pool
+	osrm       *osrm.Client
+	cache      clusterCache
+	activityTZ string
 }
 
-func NewTelemetryService(pool *pgxpool.Pool, osrmClient *osrm.Client) *TelemetryService {
+func NewTelemetryService(pool *pgxpool.Pool, osrmClient *osrm.Client, activityTZ string) *TelemetryService {
 	return &TelemetryService{
-		pool: pool,
-		osrm: osrmClient,
+		pool:       pool,
+		osrm:       osrmClient,
+		activityTZ: activityTZ,
 	}
 }
 
@@ -92,7 +95,7 @@ func validCoord(lat, lon float64) bool {
 	return finite(lat) && finite(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
 }
 
-// ValidatePayload проверяет вход телеметрии. Хендлер должен отдавать 400 при errors.Is(err, ErrInvalidTelemetry).
+
 func ValidatePayload(p *models.TelemetryPayload) error {
 	if !validCoord(p.Latitude, p.Longitude) {
 		return fmt.Errorf("%w: coordinates", ErrInvalidTelemetry)
@@ -129,8 +132,8 @@ func ValidatePayload(p *models.TelemetryPayload) error {
 	return nil
 }
 
-// resolveEventTime возвращает время события с устройства, если оно правдоподобно;
-// иначе nil, и БД подставит NOW() (часы на телефоне могут врать).
+
+
 func resolveEventTime(ms int64) *time.Time {
 	if ms <= 0 {
 		return nil
@@ -148,8 +151,8 @@ func (s *TelemetryService) CalculateNormalizedForce(bumpForce, speedKMH float64)
 	return bumpForce * (BaseSpeedKMH / safeSpeed)
 }
 
-// SeverityFor: 1 — ровно, 2 — заметно, 3 — жёстко. Нормализованная по скорости сила для этого не годится:
-// порог обнаружения растёт со скоростью, и у порога она почти одинакова на любой скорости.
+
+
 func SeverityFor(defectType string, rawForce, speedKMH float64) int {
 	threshold := math.Max(BumpBaseThresholdMs2, BumpSpeedFactor*speedKMH)
 	if defectType == "rough_road" {
@@ -174,11 +177,11 @@ func truncateRunes(s string, limit int) string {
 	return string([]rune(s)[:limit])
 }
 
-// ResolveLocation привязывает событие к дороге и возвращает WKT, тип геометрии и название дороги:
-//   - rough_road с треком > 2 точек -> /match (LINESTRING);
-//   - всё остальное (pothole и фолбэк) -> /nearest от координат события с учётом курса (POINT).
-//
-// Для ям трек не используется: клиент присылает точку удара, а первая точка трека была самой старой.
+
+
+
+
+
 func (s *TelemetryService) ResolveLocation(ctx context.Context, p *models.TelemetryPayload) (wkt, geomType, roadName string) {
 	if p.DefectType == "rough_road" && len(p.Trajectory) > 2 {
 		if w, g, name, ok := s.osrm.Match(ctx, p.Trajectory); ok {
@@ -190,8 +193,8 @@ func (s *TelemetryService) ResolveLocation(ctx context.Context, p *models.Teleme
 	return fmt.Sprintf("POINT(%f %f)", snap.Lon, snap.Lat), "Point", truncateRunes(snap.Name, MaxRoadNameRunes)
 }
 
-// findRecentDuplicate ищет запись того же пользователя и типа рядом с новой геометрией за последние часы.
-// Для гостей проверки нет: их события нельзя отнести к одному человеку.
+
+
 func (s *TelemetryService) findRecentDuplicate(ctx context.Context, userID, defectType, wkt string) (*models.TelemetryResponse, error) {
 	if userID == "" || userID == "anonymous" {
 		return nil, nil
@@ -250,8 +253,8 @@ func (s *TelemetryService) SaveTelemetry(ctx context.Context, payload *models.Te
 	normalizedForce := s.CalculateNormalizedForce(payload.BumpForce, payload.SpeedKMH)
 	severity := SeverityFor(payload.DefectType, payload.BumpForce, payload.SpeedKMH)
 
-	// Идемпотентность по (user_id, client_event_id): чужой client_event_id не затрагивает чужие строки.
-	// xmax <> 0 у строки, обновлённой веткой ON CONFLICT, то есть это повтор.
+
+
 	query := `
 		INSERT INTO telemetry (
 			user_id, location, speed_kmh, bump_force, defect_type, infrastructure_type,
@@ -299,14 +302,14 @@ func swapLonLat(pts [][]float64) [][]float64 {
 	coords := make([][]float64, 0, len(pts))
 	for _, pt := range pts {
 		if len(pt) >= 2 {
-			coords = append(coords, []float64{pt[1], pt[0]}) // [lon, lat] -> [lat, lon]
+			coords = append(coords, []float64{pt[1], pt[0]})
 		}
 	}
 	return coords
 }
 
-// parseGeoJSONLines разбирает линии GeoJSON по отдельности: склеенные в одну ломаную линии
-// давали на карте прямые «перемычки» между концом одной и началом другой.
+
+
 func parseGeoJSONLines(raw string) [][][]float64 {
 	if raw == "" {
 		return nil
@@ -345,7 +348,7 @@ func parseGeoJSONLines(raw string) [][][]float64 {
 	return nil
 }
 
-// parseGeoJSONCoordinates отдаёт все точки одним списком [lat, lon] (формат для старых клиентов).
+
 func parseGeoJSONCoordinates(raw string) [][]float64 {
 	if raw == "" {
 		return nil
@@ -389,14 +392,14 @@ func parseGeoJSONCoordinates(raw string) [][]float64 {
 	return nil
 }
 
-// clusterSQL — общий запрос кластеров.
-//
-//	$1 eps в метрах, $2 defect_type, $3 возраст в днях, $4 смещение cluster_id.
-//
-// Кластеризация идёт в EPSG:3857 (метры), eps делится на cos(широты), потому что
-// Web Mercator растягивает расстояния в 1/cos(lat) раз. minpoints = 1 оставлен
-// намеренно: одиночные удары должны остаться неподтверждёнными маркерами.
-// Записи 'anonymous' не считаются «водителями»: это гости и удалённые аккаунты, а не отдельные люди.
+
+
+
+
+
+
+
+
 const clusterSQL = `
 	WITH points AS (
 		SELECT id, user_id, location, bump_force, COALESCE(severity, 1) AS severity,
@@ -474,8 +477,8 @@ func (s *TelemetryService) queryClusters(ctx context.Context, defectType string,
 		); err != nil {
 			return nil, err
 		}
-		// Подтверждение: 2+ разных пользователя ИЛИ 3+ разных «пользователь-день».
-		// Три удара одного человека за одну поездку больше не подтверждают дефект.
+
+
 		item.IsConfirmed = item.UniqueUsers >= 2 || userDays >= 3
 		if defectType == "rough_road" {
 			item.Lines = parseGeoJSONLines(geojson)
@@ -489,8 +492,8 @@ func (s *TelemetryService) queryClusters(ctx context.Context, defectType string,
 	return out, nil
 }
 
-// GetClusters отдаёт кэш на ClusterCacheTTL; мьютекс заодно сворачивает параллельные пересчёты.
-// При ошибке БД возвращается устаревший кэш, если он есть.
+
+
 func (s *TelemetryService) GetClusters(ctx context.Context) ([]models.TelemetryCluster, error) {
 	s.cache.mu.Lock()
 	defer s.cache.mu.Unlock()
@@ -515,40 +518,71 @@ func (s *TelemetryService) GetClusters(ctx context.Context) ([]models.TelemetryC
 	return nil, err
 }
 
-func (s *TelemetryService) RecordDistance(ctx context.Context, userID string, meters float64) (*models.DistanceResponse, error) {
-	if !finite(meters) || meters > MaxDistanceBatchMeters {
+
+
+func (s *TelemetryService) RecordDistance(ctx context.Context, userID string, meters float64, batchID string) (*models.DistanceResponse, error) {
+	if !finite(meters) || meters > MaxDistanceBatchMeters || len(batchID) > MaxDistanceBatchIDLen {
 		return nil, ErrInvalidDistance
 	}
 	if meters <= 0 {
 		return &models.DistanceResponse{Status: "ok", AddedMeters: 0}, nil
 	}
+	if userID == "" || userID == "anonymous" {
+		return &models.DistanceResponse{Status: "ok", AddedMeters: meters}, nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка запуска транзакции пробега: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 
 	var total float64
-	if userID != "" && userID != "anonymous" {
-		query := `
-			UPDATE users
-			SET total_distance_meters = COALESCE(total_distance_meters, 0) + $1
-			WHERE id = $2
-			RETURNING total_distance_meters;
-		`
-		err := s.pool.QueryRow(ctx, query, meters, userID).Scan(&total)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrUserNotFound
-		}
+	err = tx.QueryRow(ctx, `SELECT COALESCE(total_distance_meters, 0) FROM users WHERE id = $1 FOR UPDATE;`, userID).Scan(&total)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ошибка чтения пробега пользователя: %w", err)
+	}
+
+	if batchID != "" {
+		tag, err := tx.Exec(ctx, `INSERT INTO distance_batches (user_id, batch_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;`, userID, batchID)
 		if err != nil {
-			return nil, fmt.Errorf("ошибка обновления пробега пользователя: %w", err)
+			return nil, fmt.Errorf("ошибка записи порции пробега: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return &models.DistanceResponse{Status: "ok", AddedMeters: 0, TotalDistanceMeters: total}, nil
 		}
 	}
 
-	return &models.DistanceResponse{
-		Status:              "ok",
-		AddedMeters:         meters,
-		TotalDistanceMeters: total,
-	}, nil
+	if err := tx.QueryRow(ctx, `
+		UPDATE users
+		SET total_distance_meters = COALESCE(total_distance_meters, 0) + $1
+		WHERE id = $2
+		RETURNING total_distance_meters;
+	`, meters, userID).Scan(&total); err != nil {
+		return nil, fmt.Errorf("ошибка обновления пробега пользователя: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO user_activity_days (user_id, day, distance_meters)
+		VALUES ($1, (NOW() AT TIME ZONE $3)::date, $2)
+		ON CONFLICT (user_id, day) DO UPDATE
+		SET distance_meters = user_activity_days.distance_meters + EXCLUDED.distance_meters;
+	`, userID, meters, s.activityTZ); err != nil {
+		return nil, fmt.Errorf("ошибка записи дня активности: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("ошибка фиксации пробега: %w", err)
+	}
+	return &models.DistanceResponse{Status: "ok", AddedMeters: meters, TotalDistanceMeters: total}, nil
 }
 
-// AddComment сохраняет комментарий. Имя автора берётся из users, а не из тела запроса
-// (иначе можно подписаться чужим именем); параметр authorName оставлен для совместимости.
+
+
 func (s *TelemetryService) AddComment(ctx context.Context, clusterID int64, userID, authorName, text string) (*models.DefectComment, error) {
 	cleanText := strings.TrimSpace(text)
 	if cleanText == "" || utf8.RuneCountInString(cleanText) > MaxCommentRunes {
@@ -578,7 +612,7 @@ func (s *TelemetryService) AddComment(ctx context.Context, clusterID int64, user
 	return &c, nil
 }
 
-// GetComments возвращает комментарии к дефекту (новые сверху, как и раньше).
+
 func (s *TelemetryService) GetComments(ctx context.Context, clusterID int64) ([]models.DefectComment, error) {
 	query := `
 		SELECT id, cluster_id, user_id, author_name, text, created_at

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../address_service.dart';
 
-/// Подпись места дефекта: название дороги с сервера сразу, запасной адрес — после геокодера.
+
 class DefectAddress extends StatefulWidget {
   final Map<String, dynamic> defect;
   final TextStyle style;

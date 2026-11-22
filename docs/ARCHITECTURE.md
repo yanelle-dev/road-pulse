@@ -123,7 +123,7 @@ backend/
 | `Config` | struct | `AppEnv`, `Port`, `DatabaseURL`, `OSRMBase`, `JWTSecret`, `TrustProxy`, `SMSGateURL`, `SMSGateUser`, `SMSGatePassword` |
 | `Load()` | func | Чтение ENV; `DATABASE_URL` и `JWT_SECRET` обязательны (`log.Fatal` с подсказкой про `.env.example`); `APP_ENV` по умолчанию `development`; у OSRM читаются оба имени — `OSRM_BASE` и `OSRM_BASE_URL` |
 
-Секрет JWT приходит в `main.go` из `cfg.JWTSecret` — отдельного `os.Getenv("JWT_SECRET")` больше нет. Провайдер SMS выбирается в `main.go` через `sms.NewProvider(cfg)`: при заданных `SMS_GATE_USER` и `SMS_GATE_PASSWORD` это `GateProvider`, в `production` без них — `log.Fatal`, иначе `MockProvider` с предупреждением в лог. `cfg.TrustProxy` передаётся в `RateLimit`.
+Секрет JWT приходит в `main.go` из `cfg.JWTSecret` — отдельного `os.Getenv("JWT_SECRET")` больше нет. Провайдер SMS выбирается в `main.go` через `sms.NewProvider(cfg)`: при заданных `SMS_GATE_USER` и `SMS_GATE_PASSWORD` это `GateProvider`, в `production` без них — `log.Fatal`, иначе `MockProvider` с предупреждением в лог. `cfg.ExposeOTP` (`EXPOSE_OTP`, в `production` — `log.Fatal`) передаётся в `NewAuthService`. `cfg.TrustProxy` передаётся в `RateLimit`.
 
 ### internal/database/database.go
 
@@ -139,6 +139,8 @@ backend/
 | `otp_codes` | `phone` PK, `code_hash` (sha256), `attempts`, `expires_at`, `created_at` |
 | `refresh_tokens` | `token_hash` PK, `user_id → users(id) ON DELETE CASCADE`, `expires_at`, `revoked`, `created_at` |
 | `trips` | `id`, `user_id → users(id)`, `started_at`, `ended_at`, `distance_meters`, `defects_count`, `smooth_ratio`, `medium_ratio`, `hard_ratio`, `created_at` |
+| `user_activity_days` | `user_id → users(id)` CASCADE, `day DATE`, `distance_meters`; PK `(user_id, day)`. Источник серии и теплокарты; при старте дозаполняется из `trips` (`database.BackfillActivity`) |
+| `distance_batches` | `user_id → users(id)` CASCADE, `batch_id`, `created_at`; PK `(user_id, batch_id)`. Принятые порции пробега, чистятся старше 30 дней |
 | `defect_comments` | `id`, `cluster_id`, `user_id`, `author_name`, `text`, `created_at` (индекс `idx_defect_comments_cluster_id`) |
 
 ### internal/models/telemetry.go
@@ -149,7 +151,7 @@ backend/
 | `TelemetryPayload` | struct | Вход POST: `user_id`, `latitude`, `longitude`, `speed_kmh`, `bump_force`, `defect_type`, `infrastructure_type`, `trajectory`, `event_time_ms`, `client_event_id`, `heading_deg`, `accuracy_m` |
 | `TelemetryResponse` | struct | Ответ POST: `status`, `id`, `snapped_lat`/`snapped_lon`, нормализованный `bump_force`, `severity`, `road_name`, типы дефекта и инфраструктуры, `geometry_type`, `duplicate` |
 | `TelemetryCluster` | struct | Элемент ответа GET: `cluster_id`, `lat`, `lon`, `max_force`, `severity`, `unique_users`, `total_hits`, `is_confirmed`, `defect_type`, `infrastructure_type`, `road_name`, `created_at`, `lines`, `coordinates` (для линий) |
-| `DistancePayload` | struct | Вход `POST /telemetry/distance`: `distance_meters` |
+| `DistancePayload` | struct | Вход `POST /telemetry/distance`: `distance_meters`, `batch_id` (идемпотентность повтора) |
 | `DistanceResponse` | struct | Ответ: `status`, `added_meters`, `total_distance_meters` (накопленный итог пользователя) |
 | `DefectComment` | struct | Комментарий: `id`, `cluster_id`, `user_id`, `author_name`, `text`, `created_at` |
 | `CreateCommentPayload` | struct | Вход `POST /telemetry/comments`: `cluster_id`, `text`, `author_name` |
@@ -161,7 +163,7 @@ backend/
 | `RequestCodePayload` | struct | `phone` |
 | `VerifyCodePayload` | struct | `phone`, `code` |
 | `RefreshTokenPayload` | struct | `refresh_token` |
-| `UserProfile` | struct | `id`, `phone`, `name`, `city`, `car_clearance`, `total_distance_meters`, `total_defects`, `rating`, `saved_suspensions`, `community_percentile`, `streak_days`, `unlocked_achievements`, `created_at` |
+| `UserProfile` | struct | `id`, `phone`, `name`, `city`, `car_clearance`, `total_distance_meters`, `total_defects`, `pothole_count`, `rough_road_count`, `rating`, `saved_suspensions`, `community_percentile`, `streak_days`, `unlocked_achievements`, `activity_days` (`ActivityDay`: `date`, `distance_meters`, `defects`), `created_at` |
 | `AuthResponse` | struct | `access_token`, `refresh_token`, `user`, `is_new_user` |
 | `UpdateProfilePayload` | struct | Указатели `name`, `city`, `car_clearance`, `streak_days`, `unlocked_achievements` (частичное обновление) |
 
@@ -197,7 +199,7 @@ backend/
 | `SeverityFor(defectType, rawForce, speedKMH)` | func → `1..3` | Ровно / заметно / жёстко по превышению порога обнаружения, не зависит от скорости |
 | `SaveTelemetry(ctx, payload)` | method → `*TelemetryResponse` | Дефолты `pothole`/`road`, валидация, привязка к дороге, поиск дубля (`duplicate: true`, запись не создаётся), `INSERT ... ON CONFLICT (user_id, client_event_id)`: повтор возвращает уже сохранённую строку. `timestamp` берётся из `event_time_ms`, если он в окне −48 ч … +5 мин, иначе `NOW()`; исходная сила — в `raw_bump_force`, оценка — в `severity`, дорога — в `road_name` |
 | `GetClusters(ctx)` | method → `[]TelemetryCluster` | Кэш на 15 с (при ошибке БД отдаётся устаревший). Два запроса по общему `clusterSQL`: ямы и линии `rough_road`; для линий — `lines` (каждая линия отдельно) и `coordinates` (одной ломаной, для старых клиентов). `severity` — p75 при трёх и более ударах, `road_name` — самое частое |
-| `RecordDistance(ctx, userID, meters)` | method → `*DistanceResponse` | Потолок `5000` м на запрос; атомарный `UPDATE users SET total_distance_meters = ... RETURNING`; для пустого `userID` и `anonymous` запись пропускается, итог нулевой; удалённый пользователь → `ErrUserNotFound` |
+| `RecordDistance(ctx, userID, meters, batchID)` | method → `*DistanceResponse` | Потолок `5000` м и 64 символа id; в одной транзакции: `FOR UPDATE` пользователя, запись `batch_id` (повтор → `added_meters: 0`), прибавление к `total_distance_meters` и к сегодняшнему дню `user_activity_days`; для пустого `userID` и `anonymous` запись пропускается; удалённый пользователь → `ErrUserNotFound` |
 | `AddComment(ctx, clusterID, userID, authorName, text)` | method → `*DefectComment` | Имя автора берётся из `users`, параметр `authorName` игнорируется; текст до 1000 символов |
 | `GetComments(ctx, clusterID)` | method → `[]DefectComment` | Комментарии кластера, новые сверху |
 
@@ -210,7 +212,8 @@ backend/
 | `ErrInvalidCode`, `ErrCodeExpired`, `ErrTooManyAttempts`, `ErrRateLimited`, `ErrOTPLocked`, `ErrInvalidPhone`, `ErrInvalidProfile`, `ErrInvalidToken`, `ErrUserNotFound` | error | Типизированные ошибки; `respondError` в handler мапит их в коды |
 | `MaxStreakDays`, `MaxAchievements` | const `3650`, `30` | Потолки значений из `sync-stats`: они входят в рейтинг, но приходят с клиента |
 | `AuthService` | struct | Пул `pgx`, `jwtSecret` и `sms.Provider` |
-| `NewAuthService(pool, secret, smsProvider)` | func | При `nil` подставляется `sms.NewMockProvider()`; секрет короче 32 символов даёт предупреждение |
+| `NewAuthService(pool, secret, smsProvider, exposeOTP)` | func | При `nil` подставляется `sms.NewMockProvider()`; секрет короче 32 символов даёт предупреждение; `exposeOTP` действует только вместе с `MockProvider` (`sms.IsMock`) |
+| `RequestCode(ctx, phone)` | method | Возвращает `*models.RequestCodeResponse`; поле `Code` заполняется только при `exposeOTP` |
 | `RequestCode(ctx, rawPhone)` | method → `(retryAfter, error)` | 4-значный код, в `otp_codes` лежит HMAC (секрет + номер), TTL 5 мин. Окно повтора (60 с, а после трёх неверных попыток — 15 мин) проверяется атомарно в UPSERT. Код наружу не возвращается |
 | `VerifyCode(ctx, rawPhone, code)` | method → `*AuthResponse` | Попытка списывается одним `UPDATE` до сравнения (не более 3), TTL и `hmac.Equal`; пользователь создаётся через `INSERT ... ON CONFLICT (phone)`; access (HS256, 24 ч) и refresh (32 байта hex, sha256 в БД, 60 дней) |
 | `Refresh(ctx, oldToken)` | method → `*AuthResponse` | Условный `UPDATE ... SET revoked` атомарно отзывает старый refresh, один токен нельзя обменять дважды; отозванные токены хранятся ещё 7 дней |
@@ -218,7 +221,9 @@ backend/
 | `ValidateAccessToken(tokenStr)` | method → `(userID, error)` | Только HS256, обязательный `exp`, извлечение `sub` |
 | `GetProfile(ctx, userID)` | method → `*UserProfile` | `getUser` плюс `COUNT(*)` дефектов, рейтинг по четырём слагаемым, «подвесок спасено» и `PERCENT_RANK()` |
 | `UpdateProfile(ctx, userID, payload)` | method → `*UserProfile` | Частичный `UPDATE ... COALESCE`; имя и город до 100 символов, клиренс 0–600 |
-| `SyncStats(ctx, userID, streak, achievements)` | method → `*UserProfile` | Записывает серию и награды с ограничением по `Max*` и возвращает профиль |
+| `SyncStats(ctx, userID, achievements)` | method → `*UserProfile` | Записывает число наград с ограничением `MaxAchievements` и возвращает профиль; серию с клиента не принимает |
+| `loadActivity(ctx, user)` | method | Дни с пробегом (`user_activity_days`) и дефектами (`telemetry`) в поясе `ACTIVITY_TZ`; заполняет `activity_days` (28 дней) и `streak_days`, сохраняя серию в `users` для рейтинга |
+| `ActivityStreak(days, today)` | func → `int` | Чистая формула серии (`auth.go`): подряд идущие активные дни до сегодня; без активности сегодня счёт идёт от вчера |
 | `DeleteAccount(ctx, userID)` | method → `error` | Транзакция: анонимизация телеметрии и удаление пользователя |
 | `getUser`, `normalizePhone`, `hashString`, `hashOTP`, `generateAccessToken`, `generateRefreshToken` | private | Чтение строки `users`, нормализация номера (только цифры, `8…` → `+7…`), sha256, HMAC кода, выпуск токенов |
 
@@ -287,7 +292,7 @@ lib/
 | Сущность | Тип | Назначение |
 |----------|-----|------------|
 | `themeModeNotifier` | `ValueNotifier<ThemeMode>` | Глобальное переключение темы; стартовое значение читается из `ThemeStore`, каждое изменение сохраняется |
-| `main()` | entry | `ensureInitialized`, `initCommunicationPort`, загрузка темы, `ApiService.recordAppOpen()`, `runApp` |
+| `main()` | entry | `ensureInitialized`, `initCommunicationPort`, загрузка темы, `runApp` |
 | `MyApp` | StatelessWidget | `MaterialApp`: светлая и тёмная темы + `themeModeNotifier`, home — `AuthGate` |
 | `AuthGate` | StatefulWidget | Состояние `bool? _authenticated` по `ApiService.isAuthenticated()`: ожидание → спиннер, авторизован → `MainScaffold`, иначе `AuthScreen`. На `AppLifecycleState.resumed` фиксирует вход в статистику активности и перепроверяет сессию (фоновая служба могла сбросить её из-за отозванного refresh), не перерисовывая интерфейс спиннером |
 
@@ -303,7 +308,7 @@ lib/
 
 | Сущность | Тип | Назначение |
 |----------|-----|------------|
-| `MainScaffold` | StatefulWidget | `IndexedStack` из `MapScreen` / `ListScreen` / `DetectScreen` / `ProfileScreen` + стеклянный таб-бар на 4 таба |
+| `MainScaffold` | StatefulWidget | `IndexedStack` из `MapScreen` / `ListScreen` / `DetectScreen` / `ProfileScreen` + таб-бар на 4 таба на сплошной подложке (без `BackdropFilter`); скрытые вкладки обёрнуты в `TickerMode(enabled: false)` — по нему экраны гасят тикеры и GPS |
 | `MainScaffold.of(context)` | static | Доступ к состоянию из потомков |
 | `MainScaffoldState.switchTab(index)` | method | Переключение вкладки (используется картой для переходов) |
 
@@ -313,12 +318,15 @@ lib/
 |----------|-----|------------|
 | `MapScreen` | StatefulWidget | `onNavigateToTab` — колбэк перехода на другую вкладку |
 | `_applyPosition` / `_locateUser` / `_loadBumps` | private methods | Позиция, скорость и курс (скорость ≥ 1.5 м/с, накопленный угол без обнуления на 360°) и `ApiService.getBumps()`; маркер «вы здесь» — `NavArrow` |
-| `_buildCircles` / `_buildPolylines` | methods | Подтверждённые кластеры: ореол и ядро, радиус и цвет по `severity` (`defectSeverity`); линии `rough_road` рисуются отдельными `Polyline` по `lines` |
+| `_buildCircles` / `_buildPolylines` | methods | Подтверждённые кластеры: один `CircleMarker` на дефект, радиус и цвет по `severity` (`defectSeverity`); линии `rough_road` рисуются отдельными `Polyline` по `lines` |
+| `_ensureLayers` | method | Кэш слоёв: пересобирает линии, круги и маркеры только при смене данных, темы или целого уровня зума (`onPositionChanged` → `_onCameraChanged`), а не на каждый GPS-фикс |
+| `_buildClusterMarkers` | method | На зуме < 13 дефекты группируются `clusterByGrid` из `calculations.dart` (ячейка 64 px Web Mercator): кружок с числом, цвет — худшая степень, тап приближает на 2 уровня |
+| `_refreshNearest` / `_setGpsListening` | methods | Три ближайших дефекта считаются не чаще раза в 5 с и при загрузке данных; поток GPS отключается, когда вкладка скрыта (`TickerMode.valuesOf`) |
 | `_buildMarkers` | method | Неподтверждённые кластеры — полые серые кружки |
 | `_buildRecordCapsule` / `_buildSearchBar` / `_buildFloatingActionBtn` | methods | Верхние оверлеи карты (капсула «ЗАПИСЬ», поиск «Куда едем?», кнопки «где я» и слои) |
 | `_buildDraggableSheet` | method | `DraggableScrollableSheet` (`0.22`/`0.38`/`0.85`): Полоса по долям `severity` реальных дефектов, стат-пилюли (один `Future<UserStats>` в состоянии, а не запрос на каждую перерисовку) и «Ближайшие дефекты» по расстоянию до пользователя |
 
-Тайлы: `tile.openstreetmap.org`, в тёмной теме — `darkModeTileBuilder`.
+Тайлы: `tile.openstreetmap.org`, в тёмной теме — `darkModeTileBuilder`. Зум 3–19, `CameraConstraint.contain` по границам мира не даёт отдалить карту до пустых полей.
 
 ### list_screen.dart
 
@@ -336,12 +344,13 @@ lib/
 | Сущность | Тип | Назначение |
 |----------|-----|------------|
 | `DetectScreen` | StatefulWidget | Экран «Запись»: реальные GPS и акселерометр, счётчик пробега поездки, старт и остановка foreground-службы; дерево обёрнуто в `WithForegroundTask` |
-| `_tripDistanceMeters` / `_lastPos` | fields | Пробег поездки (приходит сообщением `TRIP:<метры>` из isolate) и последняя позиция для спидометра |
+| `_speedKmh` / `_tripMeters` | `ValueNotifier<double>` | Скорость GPS и пробег поездки (сообщение `TRIP:<метры>` из isolate); их слушают только спидометр, баннер и карточка пробега, экран целиком не перестраивается |
 | `_checkPermissionsAndStart` | method | Автостарт при выданном доступе, иначе пуш `OnboardingPanel` |
 | `_initForegroundTask` | method | `FlutterForegroundTask.init`: канал `road_pulse_tracking` («Road Pulse Tracking»), `eventAction.repeat(5000)`, wake/wifi lock |
 | `_toggleTracking` | method | `startService(callback: startCallback)` / `stopService`; при старте обнуляет счётчик поездки, метры при этом считает isolate |
 | `_onReceiveTaskData` | method | Логи и сообщения `TRIP:<метры>` из isolate → `ApiService.addLog` и счётчик поездки |
-| `_initSensors` | method | Стрим позиции (`distanceFilter: 1`) для спидометра и стрим `accelerometer` (10 мс, тот же период, что в isolate) через `GravityFilter`; пик за интервал перерисовки (~15 кадров/с) попадает в осциллограф; одометром экран не владеет |
+| `_setGpsListening` | method | Стрим позиции (`distanceFilter: 1`) для спидометра; отключается, когда вкладка скрыта (`TickerMode.valuesOf`); одометром экран не владеет |
+| `_VibrationScope` | private StatefulWidget | Осциллограф: свой стрим `accelerometer` (10 мс, тот же период, что в isolate) через `GravityFilter`, `Ticker` с шагом 66 мс (~15 кадров/с, сам замирает на скрытой вкладке), перерисовывает только себя внутри `RepaintBoundary`; `PolotnoScopePainter.shouldRepaint` сравнивает `revision` и порог |
 | `_buildOdometerCard` | method | Карточка «ПРОБЕГ ЗА ПОЕЗДКУ» под спидометром: километры и метры в реальном времени |
 | `_buildSpeedometer` / `_buildGateBanner` | methods | Крупная скорость и баннер: пробег пишется на любой скорости, удары — от 20 км/ч |
 | `_buildScope` / `PolotnoScopePainter` | widget / CustomPainter | Осциллограф вертикальной составляющей, м/с²; пунктирный порог — `bumpThresholdFor(скорость)` (`_drawDashedLine`) |
@@ -399,18 +408,19 @@ lib/
 | `LogEntry` / `LogKind` | class / enum | Строка журнала: время, текст, вид |
 | `VerifyResult` | class | `success`, `isNewUser`, `errorMessage` |
 | `DayActivity` / `UserActivityData` | class | Ячейка теплокарты (уровни 0–3) и агрегат за 28 дней (серия, входы, активные дни) |
-| `recordAppOpen()` / `getActivityData()` | static Future | Учёт входов в `SharedPreferences` (хранение 90 дней) и сборка сетки 28 дней |
+| `getActivityData()` / `getCachedActivityData()` | static Future | Серия и сетка 28 дней из `GET /auth/me` (`activity_days`); ответ кэшируется в `activity_cache_v1`, второй метод читает только кэш; уровень клетки — `activityLevel` из `calculations.dart` |
 | `requestCode(phone)` / `verifyCode(phone, code)` | static Future | Авторизация; сохранение access/refresh токенов и профиля |
 | `updateProfile({name, city, clearance})` | static Future | Локальное сохранение и `PATCH /auth/me` при наличии токена |
 | `deleteAccount()` | static Future | `DELETE /auth/me` с последующей очисткой локальной сессии |
 | `getAccessToken()` / `getValidAccessToken()` | static Future | Access-токен с автообновлением: за 60 с до `exp` меняется по refresh (`refreshTokens`, один запрос на изолят, защита от гонки между изолятами) |
 | `isAuthenticated()` / `getUserProfile()` / `logout()` | static Future | Работа с сессией (токены и профиль в `SharedPreferences`) |
 | `_httpTimeout` | const `12 с` | Таймаут каждого HTTP-вызова; зависший запрос иначе блокировал бы отправку пробега |
-| `UserStats` | class | DTO профиля: `totalKm`, `totalDefects`, `rating`, `savedSuspensions`, `unlockedAchievements`, `streakDays`, `communityPercentile` (+ `empty()`) |
+| `UserStats` | class | DTO профиля: `totalKm`, `totalDefects`, `rating`, `savedSuspensions`, `unlockedAchievements`, `streakDays`, `communityPercentile`, `potholes`, `roughRoads` (+ `empty()`) |
 | `getDefectsCount()` / `incrementDefectsCount([delta])` | static Future | Локальный счётчик зачтённых дефектов (`user_defects_count`) и синхронизация достижений |
 | `getUserStats()` | static Future | Синхронизирует серию и награды через `POST /auth/sync-stats` (в ответе профиль со статистикой) и прибавляет неотправленный буфер; при недоступности сервера падает на локальные счётчики и `ratingFor` |
-| `sendDistance(meters)` | static Future\<bool\> | `POST /api/v1/telemetry/distance`; успех — только `200` с `total_distance_meters > 0` (для гостя сервер отвечает `200` с нулём и ничего не пишет); без токена возвращает `false`, и метры остаются в буфере |
-| `flushPendingDistance()` | static Future | Досылает накопленный `pending_distance_meters` после входа в аккаунт |
+| `sendDistance(meters, {batchId})` | static Future\<bool\> | `POST /api/v1/telemetry/distance`; успех — только `200` с `total_distance_meters > 0` (для гостя сервер отвечает `200` с нулём и ничего не пишет); без токена возвращает `false`, и метры остаются в буфере |
+| `sendPendingDistance(prefs, pending)` | static Future\<double\> | Одна порция буфера (≤ `kMaxDistanceBatchM`) с постоянным `batch_id` в `SharedPreferences` до подтверждения; возвращает принятые метры. Единственный путь отправки буфера и для фона, и для интерфейса |
+| `flushPendingDistance()` | static Future | Досылает `pending_distance_meters` после входа, только когда фоновая служба не запущена: иначе буфером владеет фон | 
 | `sendDefectStatus({...})` | static Future\<DefectSendResult\> | `POST /api/v1/telemetry` с `Bearer`; без токена не отправляет и возвращает 401 (событие остаётся в очереди до входа). Принимает `defectType`, `infrastructureType`, `trajectory`, `eventTimeMs`, `clientEventId`, `headingDeg`, `accuracyM`; возвращает HTTP-статус (`0` — сеть) и `duplicate`. Счётчик дефектов растёт **только** при `200` без `duplicate` |
 | `startTrip()` / `finishTrip({...})` / `getLastTrip()` | static Future | `POST /trips/start`, `POST /trips/finish`, `GET /trips/last` |
 | `TripData` | class | Поездка: `id`, `startedAt`, `endedAt`, `distanceMeters`, `defectsCount`, доли качества покрытия |
@@ -495,8 +505,9 @@ lib/
 
 1. Владелец одометра — фоновый isolate (`sensor_service`): точность ≤ 80 м, длина шага 0.6–300 м, ограничения по скорости нет. Экран «Запись» метры не считает, а получает счётчик поездки сообщением `TRIP:<метры>`.
 2. Каждый шаг идёт в локальный счётчик `AchievementService.addDistanceMeters` и в буфер отправки, который персистится в `pending_distance_meters`.
-3. Буфер уходит пачками: при ≥ 25 м либо ≥ 5 м за 20 с, плюс принудительно при остановке службы. Транспорт — `ApiService.sendDistance` → `POST /api/v1/telemetry/distance`; без токена метры остаются в буфере и уходят после входа (`flushPendingDistance`).
-4. Сервис атомарно прибавляет метры к `users.total_distance_meters`; для `anonymous` он только отвечает `200`, ничего не записывая.
+3. Буфер уходит пачками: при ≥ 25 м либо ≥ 5 м за 20 с, плюс принудительно при остановке службы. Транспорт — `ApiService.sendPendingDistance` (порция с `batch_id`) → `sendDistance` → `POST /api/v1/telemetry/distance`; без токена метры остаются в буфере и уходят после входа (`flushPendingDistance`).
+4. Сервис в одной транзакции прибавляет метры к `users.total_distance_meters` и к сегодняшнему дню `user_activity_days`; повтор с тем же `batch_id` ничего не прибавляет; для `anonymous` он только отвечает `200`.
+5. Метры текущей поездки фон пишет в `trip_distance_meters`; если приложение выгрузили из «Недавних», а служба жива, экран «Запись» подключается к ней без перезапуска и показывает сохранённый счётчик.
 5. Зачтённые дефекты считает клиент: `ApiService.sendDefect` увеличивает локальный счётчик **только** при ответе `200`.
 6. `ProfileScreen` синхронизирует серию и награды через `POST /auth/sync-stats`, читает статистику из ответа (пробег, дефекты, рейтинг, процентиль) и прибавляет неотправленный буфер. Рейтинг и бейдж считаются на сервере; локальные формулы в `calculations.dart` используются как оффлайн-фолбэк.
 
@@ -515,7 +526,7 @@ lib/
 
 ### Вход
 
-1. `AuthScreen` → `ApiService.requestCode` → код в БД (HMAC) и в SMS; в ответе кода нет, при `MockProvider` он печатается в лог сервиса.
+1. `AuthScreen` → `ApiService.requestCode` → код в БД (HMAC) и в SMS; в ответе кода нет, при `MockProvider` он печатается в лог сервиса; при `EXPOSE_OTP=true` код приходит в поле `code`, и `AuthScreen` показывает его над ячейками ввода.
 2. `verifyCode` → `AuthResponse`; токены и профиль в `SharedPreferences`.
 3. `is_new_user` → шаг заполнения профиля, иначе сразу `MainScaffold`.
 4. `AuthGate` при следующем запуске видит токен и открывает `MainScaffold`; `getAccessToken()` обновляет access по refresh за минуту до истечения.

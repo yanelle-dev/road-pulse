@@ -26,8 +26,17 @@ class MapScreen extends StatefulWidget {
 }
 
 class _MapScreenState extends State<MapScreen> {
-  /// Ниже этой скорости курс GPS шумит и стрелка «дрожит»: остаётся последний уверенный курс.
+
   static const double _minHeadingSpeedMs = 1.5;
+
+  static const double _minZoom = 3.0;
+  static const double _maxZoom = 19.0;
+
+  static const double _clusterMaxZoom = 13.0;
+  static const double _clusterCellPx = 64.0;
+  static const Duration _nearestRefresh = Duration(seconds: 5);
+  static final LatLngBounds _worldBounds =
+      LatLngBounds(const LatLng(-85.05, -180), const LatLng(85.05, 180));
 
   final MapController _mapController = MapController();
   List<dynamic> _bumps = [];
@@ -38,6 +47,17 @@ class _MapScreenState extends State<MapScreen> {
   StreamSubscription<Position>? _positionStream;
   late Future<UserStats> _statsFuture;
 
+
+  int? _clusterZoom;
+  bool _layersDirty = true;
+  PolotnoColors? _layersColors;
+  List<Polyline> _polylines = const [];
+  List<CircleMarker> _circles = const [];
+  List<Marker> _defectMarkers = const [];
+
+  List<Map<String, dynamic>> _nearest = const [];
+  DateTime _nearestAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   @override
   void initState() {
     super.initState();
@@ -45,7 +65,13 @@ class _MapScreenState extends State<MapScreen> {
     _loadBumps();
     _locateUser();
     _checkServiceStatus();
-    _initSpeedListener();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+
+    _setGpsListening(TickerMode.valuesOf(context).enabled);
   }
 
   @override
@@ -61,7 +87,7 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  /// Позиция, скорость и курс из одного места: раньше это были две копии в слушателе и в _locateUser.
+
   void _applyPosition(Position pos) {
     _myLocation = LatLng(pos.latitude, pos.longitude);
     _currentSpeedKmh = (pos.speed * 3.6).clamp(0.0, 999.0);
@@ -74,16 +100,54 @@ class _MapScreenState extends State<MapScreen> {
     }
     var delta = (pos.heading - prev) % 360;
     if (delta > 180) delta -= 360;
-    _headingDeg = prev + delta; // без обнуления на 360°, иначе стрелка крутится «через весь круг»
+    _headingDeg = prev + delta;
   }
 
-  void _initSpeedListener() {
+  void _setGpsListening(bool enabled) {
+    if (enabled == (_positionStream != null)) return;
+    if (!enabled) {
+      _positionStream?.cancel();
+      _positionStream = null;
+      return;
+    }
     _positionStream = Geolocator.getPositionStream(
       locationSettings: gpsStreamSettings(distanceFilter: 2),
     ).listen((pos) {
-      if (mounted) {
-        setState(() => _applyPosition(pos));
-      }
+      if (!mounted) return;
+      setState(() {
+        _applyPosition(pos);
+        if (DateTime.now().difference(_nearestAt) > _nearestRefresh) _refreshNearest();
+      });
+    }, onError: (_) {});
+  }
+
+  void _refreshNearest() {
+    _nearestAt = DateTime.now();
+    final me = _myLocation;
+    if (me == null) {
+      _nearest = const [];
+      return;
+    }
+    final scored = <(double, dynamic)>[
+      for (final b in _bumps)
+        if (_pointOf(b) case final p?)
+          (Geolocator.distanceBetween(me.latitude, me.longitude, p.latitude, p.longitude), b),
+    ]..sort((a, b) => a.$1.compareTo(b.$1));
+    _nearest = [
+      for (final (dist, b) in scored.take(3)) {...b, 'calc_distance_m': dist},
+    ];
+  }
+
+  void _onCameraChanged(MapCamera camera, bool hasGesture) {
+    final zoom = camera.zoom < _clusterMaxZoom ? camera.zoom.floor() : null;
+    if (zoom == _clusterZoom) return;
+
+    Future.microtask(() {
+      if (!mounted || zoom == _clusterZoom) return;
+      setState(() {
+        _clusterZoom = zoom;
+        _layersDirty = true;
+      });
     });
   }
 
@@ -95,7 +159,10 @@ class _MapScreenState extends State<MapScreen> {
         ),
       );
       if (mounted) {
-        setState(() => _applyPosition(pos));
+        setState(() {
+          _applyPosition(pos);
+          _refreshNearest();
+        });
         _mapController.move(_myLocation!, 15.0);
       }
     } catch (e) {
@@ -109,6 +176,8 @@ class _MapScreenState extends State<MapScreen> {
       if (mounted) {
         setState(() {
           _bumps = bumps;
+          _layersDirty = true;
+          _refreshNearest();
         });
       }
     } catch (e) {
@@ -119,7 +188,7 @@ class _MapScreenState extends State<MapScreen> {
   Color _severityColor(PolotnoColors colors, int severity) =>
       severity == 3 ? colors.s3 : (severity == 2 ? colors.s2 : colors.s1);
 
-  /// Линии участка тряски: сервер присылает их по отдельности (`lines`), старые ответы — одной ломаной.
+
   List<List<LatLng>> _linesOf(dynamic bump) {
     if (bump['defect_type'] != 'rough_road') return const [];
 
@@ -139,6 +208,86 @@ class _MapScreenState extends State<MapScreen> {
       if (points.length >= 2) result.add(points);
     }
     return result;
+  }
+
+
+  LatLng? _pointOf(dynamic bump) {
+    final lat = bump['lat'] ?? bump['latitude'];
+    final lon = bump['lon'] ?? bump['longitude'];
+    if (lat is num && lon is num && (lat != 0 || lon != 0)) {
+      return LatLng(lat.toDouble(), lon.toDouble());
+    }
+    final lines = _linesOf(bump);
+    return lines.isEmpty ? null : lines.first.first;
+  }
+
+  void _ensureLayers(PolotnoColors colors) {
+    if (!_layersDirty && identical(colors, _layersColors)) return;
+    _layersDirty = false;
+    _layersColors = colors;
+
+    final zoom = _clusterZoom;
+    if (zoom != null) {
+      _polylines = const [];
+      _circles = const [];
+      _defectMarkers = _buildClusterMarkers(colors, zoom);
+    } else {
+      _polylines = _buildPolylines(colors);
+      _circles = _buildCircles(colors);
+      _defectMarkers = _buildMarkers(colors);
+    }
+  }
+
+  List<Marker> _buildClusterMarkers(PolotnoColors colors, int zoom) {
+    final clusters = clusterByGrid(
+      [
+        for (final b in _bumps)
+          if (_pointOf(b) case final p?)
+            (lat: p.latitude, lon: p.longitude, severity: defectSeverity(b)),
+      ],
+      zoom: zoom,
+      cellPx: _clusterCellPx,
+    );
+    return [for (final c in clusters) _buildClusterMarker(colors, c, zoom)];
+  }
+
+  Marker _buildClusterMarker(PolotnoColors colors, GridCluster cluster, int zoom) {
+    final point = LatLng(cluster.lat, cluster.lon);
+    final double size = switch (cluster.count) {
+      1 => 14.0,
+      < 10 => 30.0,
+      < 100 => 36.0,
+      _ => 44.0,
+    };
+
+    return Marker(
+      point: point,
+      width: size,
+      height: size,
+      child: GestureDetector(
+        onTap: () => _mapController.move(point, (zoom + 2.0).clamp(_minZoom, _clusterMaxZoom)),
+        child: Container(
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: _severityColor(colors, cluster.maxSeverity),
+            shape: BoxShape.circle,
+            border: Border.all(color: colors.asphalt, width: 2),
+          ),
+          child: cluster.count == 1
+              ? null
+              : Text(
+                  '${cluster.count}',
+                  maxLines: 1,
+                  style: TextStyle(
+                    fontFamily: AppTheme.fontMono,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: colors.asphalt,
+                  ),
+                ),
+        ),
+      ),
+    );
   }
 
   List<Polyline> _buildPolylines(PolotnoColors colors) {
@@ -174,7 +323,7 @@ class _MapScreenState extends State<MapScreen> {
       final bool isConfirmed = b['is_confirmed'] ?? false;
       if (!isConfirmed) continue;
 
-      // Участки с геометрией линий уже отрисованы в PolylineLayer
+
       if (_linesOf(b).isNotEmpty) continue;
 
       final double lat = (b['lat'] ?? b['latitude'] ?? 0.0).toDouble();
@@ -184,16 +333,6 @@ class _MapScreenState extends State<MapScreen> {
       final severity = defectSeverity(b);
       final bumpColor = _severityColor(colors, severity);
       final double radius = severity == 3 ? 16.0 : (severity == 2 ? 12.0 : 10.0);
-
-      circles.add(
-        CircleMarker(
-          point: point,
-          color: bumpColor.withValues(alpha: 0.22),
-          borderStrokeWidth: 0,
-          useRadiusInMeter: true,
-          radius: radius * 1.8,
-        ),
-      );
 
       circles.add(
         CircleMarker(
@@ -245,6 +384,7 @@ class _MapScreenState extends State<MapScreen> {
   Widget build(BuildContext context) {
     final colors = context.colors;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    _ensureLayers(colors);
 
     return Scaffold(
       backgroundColor: colors.voidBg,
@@ -252,30 +392,36 @@ class _MapScreenState extends State<MapScreen> {
         children: [
           FlutterMap(
             mapController: _mapController,
-            options: const MapOptions(
-              initialCenter: LatLng(55.751244, 37.618423),
+            options: MapOptions(
+              initialCenter: const LatLng(55.751244, 37.618423),
               initialZoom: 14.0,
+              minZoom: _minZoom,
+              maxZoom: _maxZoom,
+
+              cameraConstraint: CameraConstraint.contain(bounds: _worldBounds),
+              onPositionChanged: _onCameraChanged,
             ),
             children: [
               TileLayer(
                 urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                 userAgentPackageName: 'com.roadpulse.app',
                 tileBuilder: isDark ? darkModeTileBuilder : null,
+                maxNativeZoom: 19,
               ),
-              PolylineLayer(polylines: _buildPolylines(colors)),
-              CircleLayer(circles: _buildCircles(colors)),
-              MarkerLayer(
-                markers: [
-                  ..._buildMarkers(colors),
-                  if (_myLocation != null)
+              if (_polylines.isNotEmpty) PolylineLayer(polylines: _polylines),
+              if (_circles.isNotEmpty) CircleLayer(circles: _circles),
+              MarkerLayer(markers: _defectMarkers),
+              if (_myLocation != null)
+                MarkerLayer(
+                  markers: [
                     Marker(
                       point: _myLocation!,
                       width: NavArrow.size,
                       height: NavArrow.size,
                       child: NavArrow(headingDeg: _headingDeg),
                     ),
-                ],
-              ),
+                  ],
+                ),
             ],
           ),
           Positioned(top: 54, left: 16, child: _buildRecordCapsule(colors)),
@@ -440,27 +586,7 @@ class _MapScreenState extends State<MapScreen> {
     final int mediumCount = severities.where((s) => s == 2).length;
     final int smoothCount = severities.length - hardCount - mediumCount;
 
-    // Сортируем реальные дефекты по расстоянию от текущей позиции
-    final List<Map<String, dynamic>> nearestBumps = [];
-    if (_myLocation != null) {
-      for (final b in _bumps) {
-        final lat = (b['lat'] ?? b['latitude'] ?? 0.0).toDouble();
-        final lon = (b['lon'] ?? b['longitude'] ?? 0.0).toDouble();
-        final dist = Geolocator.distanceBetween(
-          _myLocation!.latitude,
-          _myLocation!.longitude,
-          lat,
-          lon,
-        );
-        nearestBumps.add({
-          ...b,
-          'calc_distance_m': dist,
-        });
-      }
-      nearestBumps.sort((a, b) => (a['calc_distance_m'] as double).compareTo(b['calc_distance_m'] as double));
-    }
-
-    final displayDefects = nearestBumps.take(3).toList();
+    final displayDefects = _nearest;
 
     return DraggableScrollableSheet(
       initialChildSize: 0.38,

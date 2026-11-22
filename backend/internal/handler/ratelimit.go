@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// RateLimiter — скользящее окно в памяти одного процесса.
+
 type RateLimiter struct {
 	mu     sync.Mutex
 	limit  int
@@ -22,7 +22,7 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	return &RateLimiter{limit: limit, window: window, hits: make(map[string][]time.Time)}
 }
 
-// Allow возвращает false и время до освобождения слота, если лимит исчерпан.
+
 func (l *RateLimiter) Allow(key string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -62,8 +62,8 @@ func (l *RateLimiter) gc(now time.Time) {
 	}
 }
 
-// clientIP берёт X-Forwarded-For (последнюю запись, добавленную доверенным прокси)
-// только при trustProxy: иначе заголовок подделывается любым клиентом.
+
+
 func clientIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
 		if parts := strings.Split(r.Header.Get("X-Forwarded-For"), ","); len(parts) > 0 {
@@ -79,8 +79,8 @@ func clientIP(r *http.Request, trustProxy bool) string {
 	return host
 }
 
-// RateLimit ограничивает запросы по пользователю из JWT-контекста, а для гостей — по IP.
-// Ставится после OptionalAuth/RequireAuth, если лимит нужен per-user.
+
+
 func RateLimit(l *RateLimiter, trustProxy bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

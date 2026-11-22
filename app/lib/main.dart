@@ -7,7 +7,7 @@ import 'main_scaffold.dart';
 import 'screens/auth_screen.dart';
 import 'theme_store.dart';
 
-/// Глобальный нотификатор для мгновенного переключения темы (Light/Dark/System)
+
 final ValueNotifier<ThemeMode> themeModeNotifier = ValueNotifier(
   ThemeMode.system,
 );
@@ -18,9 +18,6 @@ void main() async {
 
   themeModeNotifier.value = await ThemeStore.load();
   themeModeNotifier.addListener(() => ThemeStore.save(themeModeNotifier.value));
-
-  // Логирование холодного старта приложения
-  await ApiService.recordAppOpen();
 
   runApp(const MyApp());
 }
@@ -46,7 +43,7 @@ class MyApp extends StatelessWidget {
   }
 }
 
-/// Виджет-шлюз: проверяет наличие токена сессии и отслеживает активность
+
 class AuthGate extends StatefulWidget {
   const AuthGate({super.key});
 
@@ -55,8 +52,8 @@ class AuthGate extends StatefulWidget {
 }
 
 class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
-  /// `null` — проверка ещё идёт. Состояние, а не FutureBuilder: повторная проверка при возврате в приложение
-  /// не должна заменять интерфейс спиннером и сбрасывать открытые экраны.
+
+
   bool? _authenticated;
 
   @override
@@ -80,9 +77,7 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
-    // Фиксация возврата в приложение из фонового режима; заодно ловим сессию,
-    // которую фоновая служба сбросила из-за отозванного refresh-токена.
-    ApiService.recordAppOpen();
+
     _checkSession();
   }
 
